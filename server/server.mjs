@@ -10,7 +10,7 @@ const webRoot = join(root, 'dist', 'dashboard', 'browser');
 const iconRoot = join(root, 'data', 'icons');
 const snapshotRequest = 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\PathOfIdle\\BepInEx\\PathOfIdleStats\\snapshot.request';
 const clients = new Set();
-const state = { connected: false, gameRunning: false, updatedAt: null, heroes: [], slots: [], resources: [], sanctum: null, inventory: [], battles: [], events: [], catalogs: {} };
+const state = { connected: false, gameRunning: false, updatedAt: null, snapshotUpdatedAt: null, heroes: [], slots: [], resources: [], sanctum: null, inventory: [], battles: [], events: [], catalogs: {} };
 let lastGameHeartbeat = 0;
 await mkdir(dataDirectory, { recursive: true });
 
@@ -21,10 +21,11 @@ function applyEvent(event) {
     lastGameHeartbeat = Date.now();
     state.gameRunning = true;
   }
-  if (!event.type.startsWith('catalog.') && event.type !== 'heartbeat') {
+  if (!event.type.startsWith('catalog.') && !event.type.startsWith('snapshot.') && event.type !== 'heartbeat') {
     state.events.unshift(event);
     state.events = state.events.slice(0, 100);
   }
+  if (event.type.startsWith('snapshot.')) state.snapshotUpdatedAt = event.timestamp;
   if (event.type === 'snapshot.heroes') state.heroes = event.payload?.heroes ?? event.payload ?? [];
   if (event.type === 'snapshot.slots') state.slots = event.payload?.slots ?? [];
   if (event.type === 'snapshot.resources') {
@@ -111,7 +112,7 @@ const server = createServer(async (request, response) => {
         const catalogDirectory = join(dataDirectory, 'catalogs');
         await mkdir(catalogDirectory, { recursive: true });
         await import('node:fs/promises').then(({ writeFile }) => writeFile(join(catalogDirectory, event.type.slice(8) + '.json'), JSON.stringify(event.payload), 'utf8'));
-      } else if (event.type !== 'heartbeat') {
+      } else if (event.type !== 'heartbeat' && !event.type.startsWith('snapshot.')) {
         await appendFile(eventLog, JSON.stringify(event) + '\n', 'utf8');
       }
       applyEvent(event);

@@ -27,6 +27,8 @@ public sealed class Plugin : BasePlugin
 
     private static Plugin? Instance;
     private static readonly object StateLock = new();
+    private static readonly Dictionary<nint, Dictionary<string, object?>> EffectOrigins = new();
+    [ThreadStatic] private static object? currentEffectSkill;
     private static readonly Dictionary<int, BattleCapture> Battles = new();
     private static readonly Queue<string> PendingIcons = new();
     private static readonly HashSet<string> KnownIcons = new(StringComparer.OrdinalIgnoreCase);
@@ -47,6 +49,8 @@ public sealed class Plugin : BasePlugin
         Patch("AdvFieldData", "BattleEnd", nameof(BattleEndedPostfix));
         Patch("TableData", "init", nameof(TableReadyPostfix));
         Patch("Root", "Update", nameof(RootUpdatePostfix));
+        PatchWithContext("TriggerResultData", "DoAbility", nameof(AbilityResultPrefix), nameof(AbilityResultFinalizer));
+        Patch("ComAbilityData", "AddAbility", nameof(AbilityAddedPostfix));
         writer.Enqueue("heartbeat", new { pluginVersion = PluginVersion, mode = "live" });
         Log.LogInfo($"{PluginName} {PluginVersion} loaded with read-only telemetry hooks.");
     }
@@ -108,6 +112,35 @@ public sealed class Plugin : BasePlugin
         var postfix = AccessTools.Method(typeof(Plugin), postfixName) ?? throw new InvalidOperationException($"Plugin hook not found: {postfixName}");
         harmony!.Patch(original, postfix: new HarmonyMethod(postfix));
         Log.LogInfo($"Hooked {typeName}.{methodName}");
+    }
+
+    private void PatchWithContext(string typeName, string methodName, string prefixName, string finalizerName)
+    {
+        var type = GameType(typeName) ?? throw new InvalidOperationException($"Game type not found: {typeName}");
+        var original = AccessTools.Method(type, methodName) ?? throw new InvalidOperationException($"Game method not found: {typeName}.{methodName}");
+        harmony!.Patch(original,
+            prefix: new HarmonyMethod(AccessTools.Method(typeof(Plugin), prefixName)),
+            finalizer: new HarmonyMethod(AccessTools.Method(typeof(Plugin), finalizerName)));
+        Log.LogInfo($"Hooked {typeName}.{methodName} effect context");
+    }
+
+    private static void AbilityResultPrefix(object __instance)
+        => currentEffectSkill = Read(Read(__instance, "triggerData"), "skillData");
+
+    private static Exception? AbilityResultFinalizer(Exception? __exception)
+    {
+        currentEffectSkill = null;
+        return __exception;
+    }
+
+    private static void AbilityAddedPostfix(object? __result)
+    {
+        if (__result is null || currentEffectSkill is null) return;
+        var pointer = NativePointer(__result);
+        if (pointer == 0) return;
+        var origin = DescribeSkillOrigin(currentEffectSkill, ReadNullableInt(Read(currentEffectSkill, "tSkillData"), "id"));
+        origin["originKind"] = "skill";
+        lock (StateLock) EffectOrigins[pointer] = origin;
     }
 
     private static void BattleCreatedPostfix(object? __result) => SafeHook("battle-created", () =>
@@ -211,6 +244,7 @@ public sealed class Plugin : BasePlugin
         var equipped = ReadList(Read(Read(hero, "heroEquipData"), "fieldList"))
             .Select(field => Read(field, "itemData")).Where(item => item is not null)
             .Select(item => DescribeItem(item!)).ToList();
+        var currentHealth = ReadNullableDouble(Read(combat, "comResData"), "nowHp");
         return new()
         {
             ["uniqueId"] = ReadNullableInt(save, "uniqueId"), ["id"] = ReadNullableInt(save, "id"),
@@ -224,11 +258,196 @@ public sealed class Plugin : BasePlugin
             ["attributes"] = DescribeAttributes(Read(hero, "attrData")),
             ["stats"] = DescribeStats(Read(hero, "attrData"), hero, ReadNullableInt(save, "level")),
             ["combatStats"] = DescribeStats(Read(combat, "attrData"), hero, ReadNullableInt(save, "level")),
+            ["combatEffects"] = TryDescribeCombatEffects(combat),
             ["inCombat"] = combat is not null,
+            ["currentHealth"] = currentHealth,
+            ["isDead"] = combat is not null && currentHealth is <= 0,
             ["equippedItems"] = equipped
             , ["talents"] = ReadValues(Read(Read(hero, "heroTalentData"), "talentDic")).Select(DescribeHeroTalent).ToList()
         };
     }
+
+    private static List<Dictionary<string, object?>> TryDescribeCombatEffects(object? combat)
+    {
+        try { return DescribeCombatEffects(combat); }
+        catch (Exception error)
+        {
+            Instance?.Log.LogWarning($"Combat effect extraction failed safely: {error.Message}");
+            return new();
+        }
+    }
+
+    private static List<Dictionary<string, object?>> DescribeCombatEffects(object? combat)
+    {
+        if (combat is null) return new();
+        var displayedEffects = DescribeDisplayedCombatEffects(combat);
+        if (displayedEffects.Count > 0) return displayedEffects;
+
+        var abilities = ReadList(Read(Read(combat, "comAbilityData"), "abilityList"))
+            .Where(ability => ability is not null)
+            .Select(ability => new { Ability = ability!, Definition = Read(ability, "tAbilityData") })
+            .Where(entry => entry.Definition is not null && ReadNullableInt(entry.Definition, "type") is >= 1 and <= 7)
+            .GroupBy(entry => new
+            {
+                DefinitionPointer = NativePointer(entry.Definition!),
+                DefinitionId = ReadNullableInt(entry.Definition, "id") ?? 0,
+                Source = Read(entry.Ability, "fromCombatData") is { } source ? NativePointer(source) : (nint)0,
+                Level = ReadNullableInt(entry.Ability, "level")
+            });
+        var result = new List<Dictionary<string, object?>>();
+        foreach (var group in abilities)
+        {
+            var first = group.First();
+            result.Add(DescribeCombatEffect(combat, first.Ability, group.Count(), null, "runtime-list"));
+        }
+        return result.OrderBy(effect => Convert.ToString(effect["classification"], CultureInfo.InvariantCulture))
+            .ThenBy(effect => Convert.ToString(effect["englishName"], CultureInfo.InvariantCulture)).ToList();
+    }
+
+    private static List<Dictionary<string, object?>> DescribeDisplayedCombatEffects(object combat)
+    {
+        var barType = GameType("BarCombatCell");
+        if (barType is null) return new();
+        object? bars;
+        try
+        {
+            var finder = typeof(Resources).GetMethod("FindObjectsOfTypeAll", new[] { typeof(Type) });
+            bars = finder?.Invoke(null, new object[] { barType });
+        }
+        catch { return new(); }
+
+        foreach (var bar in ReadSequence(bars))
+        {
+            if (NativePointer(Read(bar, "combatData")!) != NativePointer(combat)) continue;
+            var result = new List<Dictionary<string, object?>>();
+            foreach (var cell in ReadList(Read(bar, "abilityCellList")))
+            {
+                var ability = Read(cell, "abilityData");
+                if (ability is null) continue;
+                var table = Read(ability, "tAbilityData");
+                if (table is null || ReadNullableInt(table, "type") is not (>= 1 and <= 7)) continue;
+                var sprite = Read(Read(cell, "iconImg"), "sprite") as Sprite;
+                var spriteName = sprite is null ? null : ReadString(sprite, "name");
+                var iconKey = sprite is null ? null : $"displayed_effect_{ReadNullableInt(table, "id")}_{spriteName ?? "sprite"}";
+                if (sprite is not null && iconKey is not null) ExportSprite(sprite, iconKey);
+                result.Add(DescribeCombatEffect(combat, ability, Math.Max(1, ReadNullableInt(cell, "floor") ?? 1), iconKey, "game-ui"));
+            }
+            return result.OrderBy(effect => Convert.ToString(effect["classification"], CultureInfo.InvariantCulture))
+                .ThenBy(effect => Convert.ToString(effect["englishName"], CultureInfo.InvariantCulture)).ToList();
+        }
+        return new();
+    }
+
+    private static Dictionary<string, object?> DescribeCombatEffect(object targetCombat, object ability, int stacks, string? displayedIconKey, string representation)
+    {
+        var table = Read(ability, "tAbilityData");
+        var definitionId = ReadNullableInt(table, "id") ?? 0;
+        var source = Read(ability, "fromCombatData");
+        var sourceHero = Read(source, "heroData");
+        var sourceHeroSave = Read(sourceHero, "saveHeroData");
+        var sourceEnemy = Read(source, "tEnemyData");
+        var sourceName = ReadString(sourceHeroSave, "name") ?? EnglishName(sourceEnemy, ReadString(sourceEnemy, "name"));
+        var origin = FindExactAbilityOrigin(targetCombat, ability);
+        var tableName = ReadString(table, "name");
+        var tableEnglishName = ReadString(table, "name_en") ?? EnglishName(table, tableName);
+        var tableDescription = ReadString(table, "des");
+        var tableEnglishDescription = ReadString(table, "des_en") ?? EnglishText(table, "_des", tableDescription);
+        var icon = displayedIconKey ?? ReadString(table, "icon") ?? Convert.ToString(origin?["iconKey"], CultureInfo.InvariantCulture);
+        var typeId = ReadNullableInt(table, "type");
+        QueueIcon(icon);
+        return new Dictionary<string, object?>
+        {
+            ["id"] = definitionId,
+            ["definitionId"] = definitionId,
+            ["runtimeId"] = ReadNullableInt(ability, "id"),
+            ["name"] = tableName,
+            ["englishName"] = tableEnglishName,
+            ["description"] = tableDescription,
+            ["englishDescription"] = tableEnglishDescription,
+            ["iconKey"] = icon,
+            ["iconUrl"] = IconUrl(icon),
+            ["typeId"] = typeId,
+            ["type"] = AbilityTypeName(typeId),
+            ["classification"] = AbilityClassification(typeId),
+            ["stacks"] = stacks,
+            ["configuredStack"] = ReadNullableInt(table, "stack"),
+            ["level"] = ReadNullableInt(ability, "level"),
+            ["duration"] = ReadNullableDouble(ability, "duration"),
+            ["elapsedDuration"] = ReadNullableDouble(ability, "nowDuration"),
+            ["sourceName"] = sourceName,
+            ["sourceHeroId"] = ReadNullableInt(sourceHeroSave, "uniqueId"),
+            ["sourceKind"] = sourceHero is not null ? "hero" : sourceEnemy is not null ? "enemy" : "unknown",
+            ["sourceSkillId"] = origin?["skillId"],
+            ["sourceSkillName"] = origin?["englishName"] ?? origin?["name"],
+            ["originKind"] = origin?["originKind"],
+            ["originName"] = origin?["englishName"] ?? origin?["name"],
+            ["originVerified"] = origin is not null,
+            ["representation"] = representation
+        };
+    }
+
+    private static Dictionary<string, object?>? FindExactAbilityOrigin(object targetCombat, object ability)
+    {
+        lock (StateLock)
+            if (EffectOrigins.TryGetValue(NativePointer(ability), out var capturedOrigin))
+                return new Dictionary<string, object?>(capturedOrigin);
+        foreach (var aura in ReadList(Read(targetCombat, "auraEffectList")))
+        {
+            if (!ReadList(Read(aura, "abilityList")).Any(item => NativePointer(item) == NativePointer(ability))) continue;
+            var auraSkill = Read(aura, "ownSkillData");
+            var auraSkillId = InvokeInt(aura, "GetAuraSourceSkillId") ?? ReadNullableInt(Read(auraSkill, "tSkillData"), "id");
+            var sourceCombat = Read(aura, "fromCombatData");
+            auraSkill ??= ReadList(Read(Read(sourceCombat, "comSkillData"), "skillList"))
+                .FirstOrDefault(skill => ReadNullableInt(Read(skill, "tSkillData"), "id") == auraSkillId);
+            if (auraSkill is not null)
+            {
+                var origin = DescribeSkillOrigin(auraSkill, auraSkillId);
+                origin["originKind"] = "skill";
+                return origin;
+            }
+        }
+        return null;
+    }
+
+    private static Dictionary<string, object?> DescribeSkillOrigin(object skill, int? knownSkillId)
+    {
+        var skillTable = Read(skill, "tSkillData");
+        var info = Read(skill, "tSkillInfoData");
+        var talentTable = Read(Read(skill, "ownTalentData"), "tTalentData");
+        var skillId = knownSkillId ?? ReadNullableInt(skillTable, "id");
+        if (talentTable is null && skillId is > 0)
+        {
+            var hero = Read(Read(skill, "ownCombatData"), "heroData");
+            talentTable = ReadValues(Read(Read(hero, "heroTalentData"), "talentDic"))
+                .Select(talent => Read(talent, "tTalentData"))
+                .FirstOrDefault(table => ReadNullableInt(table, "skillId") == skillId);
+        }
+        var titleRow = talentTable ?? skillTable;
+        var name = ReadString(titleRow, "name");
+        var description = ReadString(info, "des");
+        return new Dictionary<string, object?>
+        {
+            ["skillId"] = skillId,
+            ["name"] = name,
+            ["englishName"] = EnglishName(titleRow, name),
+            ["description"] = description,
+            ["englishDescription"] = ReadString(info, "des_en") ?? EnglishText(info, "_des", description),
+            ["iconKey"] = ReadString(talentTable, "icon")
+        };
+    }
+
+    private static string AbilityClassification(int? typeId) => typeId switch
+    {
+        1 or 4 or 6 or 7 => "buff",
+        2 or 3 => "debuff",
+        _ => "other"
+    };
+
+    private static string AbilityTypeName(int? typeId) => typeId switch
+    {
+        1 => "Buff", 2 => "Weaken", 3 => "Ailment", 4 => "Enhancement",
+        5 => "Continuous", 6 => "Aura", 7 => "Immunity", _ => "Other"
+    };
 
     private static Dictionary<string, object?> DescribeHeroTalent(object talent)
     {
@@ -535,15 +754,28 @@ public sealed class Plugin : BasePlugin
                 var resMgr = ReadStatic("Game", "resMgr");
                 var sprite = resMgr?.GetType().GetMethod("GetSprite")?.Invoke(resMgr, new object[] { key }) as Sprite;
                 if (sprite is null) continue;
-                var rect = sprite.textureRect;
-                var pixels = sprite.texture.GetPixels((int)rect.x, (int)rect.y, (int)rect.width, (int)rect.height);
-                var copy = new Texture2D((int)rect.width, (int)rect.height, TextureFormat.RGBA32, false);
-                copy.SetPixels(pixels); copy.Apply();
-                File.WriteAllBytes(path, ImageConversion.EncodeToPNG(copy));
-                UnityEngine.Object.Destroy(copy);
+                ExportSprite(sprite, key);
             }
             catch (Exception error) { Instance?.Log.LogDebug($"Icon export skipped for {key}: {error.Message}"); }
         }
+    }
+
+    private static void ExportSprite(Sprite sprite, string key)
+    {
+        var directory = Path.Combine(Paths.BepInExRootPath, "PathOfIdleStats", "icons");
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, IconFile(key));
+        if (File.Exists(path)) return;
+        try
+        {
+            var rect = sprite.textureRect;
+            var pixels = sprite.texture.GetPixels((int)rect.x, (int)rect.y, (int)rect.width, (int)rect.height);
+            var copy = new Texture2D((int)rect.width, (int)rect.height, TextureFormat.RGBA32, false);
+            copy.SetPixels(pixels); copy.Apply();
+            File.WriteAllBytes(path, ImageConversion.EncodeToPNG(copy));
+            UnityEngine.Object.Destroy(copy);
+        }
+        catch (Exception error) { Instance?.Log.LogDebug($"Runtime sprite export skipped for {key}: {error.Message}"); }
     }
 
     private static IEnumerable<object> ReadValues(object? collection)
@@ -616,6 +848,20 @@ public sealed class Plugin : BasePlugin
         }
     }
 
+    private static IEnumerable<object> ReadSequence(object? sequence)
+    {
+        if (sequence is null) yield break;
+        var item = sequence.GetType().GetMethod("get_Item", new[] { typeof(int) });
+        if (item is null) yield break;
+        var count = ReadNullableInt(sequence, "Count") ?? ReadNullableInt(sequence, "Length") ?? 0;
+        for (var index = 0; index < count; index++)
+        {
+            object? value = null;
+            try { value = item.Invoke(sequence, new object[] { index }); } catch { }
+            if (value is not null) yield return value;
+        }
+    }
+
     private static object? Read(object? value, string name)
     {
         if (value is null) return null;
@@ -624,6 +870,7 @@ public sealed class Plugin : BasePlugin
     }
     private static int ReadInt(object? value, string name) => Convert.ToInt32(Read(value, name) ?? 0, CultureInfo.InvariantCulture);
     private static int? ReadNullableInt(object? value, string name) => Read(value, name) is { } raw ? Convert.ToInt32(raw, CultureInfo.InvariantCulture) : null;
+    private static double? ReadNullableDouble(object? value, string name) => Read(value, name) is { } raw ? Convert.ToDouble(raw, CultureInfo.InvariantCulture) : null;
     private static string? ReadString(object? value, string name) => Read(value, name)?.ToString();
     private static string? InvokeString(object value, string method) { try { return value.GetType().GetMethod(method)?.Invoke(value, null)?.ToString(); } catch { return null; } }
     private static int? InvokeInt(object value, string method) { try { return Convert.ToInt32(value.GetType().GetMethod(method)?.Invoke(value, null), CultureInfo.InvariantCulture); } catch { return null; } }

@@ -1,13 +1,15 @@
 import 'zone.js';
 import { CommonModule } from '@angular/common';
-import { ChangeDetectionStrategy, Component, HostListener, OnDestroy, OnInit, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, HostListener, NgZone, OnDestroy, OnInit, signal } from '@angular/core';
 import { bootstrapApplication } from '@angular/platform-browser';
 
 type TelemetryEvent = { type: string; timestamp?: string; payload?: unknown } & Record<string, unknown>;
+type CombatTimelineEntry = { id: number; capturedAt: number; stats: any[]; effects: any[] };
 type TelemetryState = {
   connected: boolean;
   gameRunning: boolean;
   updatedAt: string | null;
+  snapshotUpdatedAt?: string | null;
   heroes: unknown[];
   slots: Array<{ battleIndex: number; heroes: unknown[] }>;
   resources: unknown[];
@@ -156,7 +158,7 @@ type TelemetryState = {
           </div>
 
           <ng-template #talentNode let-talent>
-            <div class="flex w-24 flex-col items-center" [attr.data-talent-id]="$any(talent).id">
+            <div class="flex w-24 flex-col items-center" [attr.data-talent-id]="$any(talent).id" (pointerenter)="showTalentTooltip($event, $any(talent))" (pointerleave)="hideTooltips()">
               <div class="relative h-12 w-12 border bg-zinc-950 p-1" [class]="talentBorderClass(talent)" [class.rounded-lg]="$any(talent).skillId" [class.rounded-full]="!$any(talent).skillId">
                 <img *ngIf="$any(talent).iconUrl" [src]="$any(talent).iconUrl" class="h-full w-full object-contain" [class.rounded]="$any(talent).skillId" [class.rounded-full]="!$any(talent).skillId" alt="">
                 <span class="absolute -bottom-2 left-1/2 -translate-x-1/2 rounded-full border border-zinc-700 bg-zinc-950 px-1.5 py-0.5 text-[10px] text-zinc-200">{{ $any(talent).effectiveRank ?? $any(talent).rank ?? 0 }}/{{ $any(talent).maxRank ?? '?' }}</span>
@@ -170,15 +172,40 @@ type TelemetryState = {
           </ng-container>
 
           <section *ngIf="selectedHeroTab() === 'stats'" class="mt-6">
+            <section class="mb-4 rounded-xl border border-zinc-800 bg-zinc-900/40 px-5 py-3" aria-label="Combat stats timeline">
+              <div class="relative h-10">
+                <div class="absolute left-0 right-0 top-1/2 h-px -translate-y-1/2 bg-zinc-700"></div>
+                <button *ngFor="let entry of timelineEntries(); let index = index; trackBy: trackTimelineEntry" type="button" (click)="selectTimelineEntry(entry.id)" [style.left.%]="timelinePosition(index)" [attr.aria-label]="timelineEntryLabel(entry, index)" class="absolute top-1/2 flex h-8 w-8 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 p-0 leading-none shadow-lg transition" [class]="selectedTimelineId() === entry.id ? 'border-amber-300 bg-amber-500 text-zinc-950' : 'border-zinc-500 bg-zinc-800 text-zinc-300 hover:border-amber-500'">
+                  <span class="text-[10px] font-bold">{{ index + 1 }}</span>
+                </button>
+              </div>
+            </section>
             <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
-              <p class="text-sm text-zinc-400">Current values and the live values after combat effects are applied.</p>
-              <button type="button" (click)="refreshHeroes()" [disabled]="refreshing()" class="rounded-lg border border-amber-800 bg-amber-950/40 px-3 py-2 text-sm text-amber-300 hover:bg-amber-950 disabled:opacity-50">{{ refreshing() ? 'Refreshing…' : 'Refresh stats now' }}</button>
+              <div class="flex min-w-0 flex-1 flex-wrap items-center gap-x-4 gap-y-2">
+                <ng-container *ngFor="let group of combatEffectGroups($any(hero))">
+                  <div *ngIf="group.effects.length" class="flex items-center gap-1.5">
+                    <span class="mr-1 text-[10px] font-semibold uppercase tracking-wider" [class]="effectGroupLabelClass(group.classification)">{{ group.label }}</span>
+                    <button *ngFor="let effect of group.effects; trackBy: trackEffect" type="button" [attr.data-effect-key]="effectKey($any(effect))" (pointerenter)="showEffectTooltip($event, $any(effect))" (pointerleave)="hideTooltips()" class="relative h-9 w-9 rounded-lg border bg-zinc-950 p-1" [class]="effectBorderClass($any(effect))" [attr.aria-label]="effectTitle($any(effect))">
+                      <img *ngIf="effectIconUrl($any(effect)) as effectIcon" [src]="effectIcon" class="h-full w-full object-contain" alt="">
+                      <span *ngIf="$any(effect).stacks > 1" class="absolute -bottom-1.5 -right-1.5 min-w-4 rounded-full border border-zinc-700 bg-zinc-950 px-1 text-center text-[9px] font-bold text-zinc-100">{{ $any(effect).stacks }}</span>
+                    </button>
+                  </div>
+                </ng-container>
+                <span *ngIf="!displayedCombatEffects($any(hero)).length" class="text-xs text-zinc-600">No active effects captured</span>
+              </div>
+              <div class="flex shrink-0 items-center gap-2">
+                <button type="button" (click)="moveTimelineSelection(-1)" [disabled]="!hasPreviousTimelineEntry()" aria-label="Previous timeline snapshot" title="Previous snapshot" class="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40">←</button>
+                <button type="button" (click)="moveTimelineSelection(1)" [disabled]="!hasNextTimelineEntry()" aria-label="Next timeline snapshot" title="Next snapshot" class="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40">→</button>
+                <button type="button" (click)="clearTimeline()" [disabled]="!timelineEntries().length" class="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-400 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40">Clear</button>
+                <button type="button" (click)="toggleRecording()" [disabled]="(refreshing() && !recording()) || (!recording() && isSelectedHeroDead())" class="rounded-lg border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50" [class]="recording() ? 'border-rose-700 bg-rose-950/50 text-rose-300' : 'border-emerald-800 bg-emerald-950/40 text-emerald-300 hover:bg-emerald-950'">{{ recording() ? 'Stop' : 'Record' }}</button>
+                <button type="button" (click)="refreshHeroes(true)" [disabled]="refreshing() || recording()" class="rounded-lg border border-amber-800 bg-amber-950/40 px-3 py-2 text-sm text-amber-300 hover:bg-amber-950 disabled:opacity-50">Refresh</button>
+              </div>
             </div>
             <div class="grid gap-4 md:grid-cols-2">
               <section class="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4">
                 <h3 class="mb-3 text-center text-sm font-semibold text-zinc-200">Current hero stats</h3>
                 <div *ngIf="heroStats($any(hero), false).length; else noCurrentStats" class="divide-y divide-zinc-800">
-                  <div *ngFor="let stat of heroStats($any(hero), false); trackBy: trackStat" [attr.data-stat-key]="statKey(stat, false)" class="flex items-center justify-between gap-4 px-2 py-2 text-sm hover:bg-zinc-800/60">
+                  <div *ngFor="let stat of heroStats($any(hero), false); trackBy: trackStat" [attr.data-stat-key]="statKey(stat, false)" (pointerenter)="showStatTooltip($event, $any(stat))" (pointerleave)="hideTooltips()" class="flex items-center justify-between gap-4 px-2 py-2 text-sm hover:bg-zinc-800/60">
                     <span class="min-w-0 truncate text-zinc-400">{{ statName($any(stat)) }}</span>
                     <span class="shrink-0 font-mono text-zinc-100">{{ statListValue($any(stat)) }}</span>
                   </div>
@@ -186,9 +213,9 @@ type TelemetryState = {
                 <ng-template #noCurrentStats><p class="py-8 text-center text-sm text-zinc-600">Refresh to capture hero stats.</p></ng-template>
               </section>
               <section class="rounded-xl border border-rose-950 bg-rose-950/10 p-4">
-                <h3 class="mb-3 text-center text-sm font-semibold text-rose-200">Live combat stats</h3>
+                <h3 class="mb-3 text-center text-sm font-semibold text-rose-200">Live combat stats<span *ngIf="selectedTimelineEntry() as entry" class="ml-2 font-normal text-rose-400/60">{{ entry.capturedAt | date:'HH:mm:ss' }}</span></h3>
                 <div *ngIf="heroStats($any(hero), true).length; else noCombatStats" class="divide-y divide-zinc-800">
-                  <div *ngFor="let stat of heroStats($any(hero), true); trackBy: trackStat" [attr.data-stat-key]="statKey(stat, true)" class="flex items-center justify-between gap-4 px-2 py-2 text-sm hover:bg-zinc-800/60">
+                  <div *ngFor="let stat of heroStats($any(hero), true); trackBy: trackStat" [attr.data-stat-key]="statKey(stat, true)" (pointerenter)="showStatTooltip($event, $any(stat))" (pointerleave)="hideTooltips()" class="flex items-center justify-between gap-4 px-2 py-2 text-sm hover:bg-zinc-800/60">
                     <span class="min-w-0 truncate text-zinc-400">{{ statName($any(stat)) }}</span>
                     <span class="shrink-0 font-mono text-rose-100">{{ statListValue($any(stat)) }}</span>
                   </div>
@@ -212,6 +239,19 @@ type TelemetryState = {
             <p *ngIf="$any(stat).explanation || $any(stat).specialDescription" class="mt-2 border-t border-zinc-800 pt-2 text-xs leading-relaxed text-zinc-400">{{ $any(stat).explanation || $any(stat).specialDescription }}</p>
             <p class="mt-2 text-[10px] text-zinc-600">Internal: {{ $any(stat).key }} · ID {{ $any(stat).id }}</p>
           </div>
+          <div id="effect-tooltip" *ngIf="hoveredEffect() as effect" class="pointer-events-none fixed left-0 top-0 z-[70] w-80 rounded-xl border border-zinc-700 bg-zinc-950 p-3 text-left shadow-2xl will-change-transform">
+            <div class="flex items-start gap-3">
+              <img *ngIf="effectIconUrl($any(effect)) as effectIcon" [src]="effectIcon" class="h-10 w-10 shrink-0 rounded-md bg-zinc-900 object-contain p-1" alt="">
+              <div class="min-w-0"><p class="font-medium text-amber-200">{{ effectTitle($any(effect)) }}</p><p class="mt-0.5 text-xs text-zinc-400">{{ $any(effect).type || 'Effect' }}<span *ngIf="$any(effect).stacks > 1"> · {{ $any(effect).stacks }} stacks</span></p></div>
+            </div>
+            <p *ngIf="$any(effect).englishDescription || $any(effect).description" class="mt-3 text-xs leading-relaxed text-zinc-300">{{ $any(effect).englishDescription || $any(effect).description }}</p>
+            <div class="mt-3 space-y-1 border-t border-zinc-800 pt-2 text-xs text-zinc-400">
+              <p><span class="text-zinc-600">Reported source:</span> {{ effectSourceLabel($any(effect)) }}</p>
+              <p *ngIf="effectDuration($any(effect))"><span class="text-zinc-600">Duration:</span> {{ effectDuration($any(effect)) }}</p>
+              <p *ngIf="$any(effect).level != null"><span class="text-zinc-600">Level:</span> {{ $any(effect).level }}</p>
+              <p class="text-[10px] text-zinc-600">Effect ID {{ $any(effect).id }}</p>
+            </div>
+          </div>
         </section>
       </div>
 
@@ -225,13 +265,31 @@ class AppComponent implements OnInit, OnDestroy {
   readonly selectedHeroTab = signal<'talents' | 'stats'>('talents');
   readonly hoveredTalent = signal<any | null>(null);
   readonly hoveredStat = signal<any | null>(null);
+  readonly hoveredEffect = signal<any | null>(null);
   readonly refreshing = signal(false);
+  readonly recording = signal(false);
+  readonly timelineEntries = signal<CombatTimelineEntry[]>([]);
+  readonly selectedTimelineId = signal<number | null>(null);
   readonly state = signal<TelemetryState>({ connected: false, gameRunning: false, updatedAt: null, heroes: [], slots: [], resources: [], sanctum: null, inventory: [], battles: [], events: [], catalogs: {} });
   readonly status = signal('Connecting');
   private stream?: EventSource;
+  private recordingTimer?: number;
+  private recordingDelayResolve?: () => void;
+  private captureQueue: Promise<void> = Promise.resolve();
+  private recordingSession = 0;
+  private recordingBattleSlot: number | null = null;
+  private recordingBattleMarker: string | null = null;
+  private pendingSnapshot?: { previousTimestamp: string | null; resolve: (state: TelemetryState | null) => void; timeout: number };
   private tooltipFrame?: number;
+  private activeTooltipId?: string;
+  private readonly nativePointerMove = (event: PointerEvent) => {
+    if (this.activeTooltipId) this.positionTooltip(event, this.activeTooltipId);
+  };
+
+  constructor(private readonly zone: NgZone) {}
 
   async ngOnInit() {
+    this.zone.runOutsideAngular(() => document.addEventListener('pointermove', this.nativePointerMove, { passive: true }));
     try {
       const [live, catalogs] = await Promise.all([
         fetch('/api/state').then(response => response.json()),
@@ -245,13 +303,32 @@ class AppComponent implements OnInit, OnDestroy {
     this.stream.onmessage = event => {
       const next = { ...JSON.parse(event.data), catalogs: this.state().catalogs } as TelemetryState;
       this.state.set(next);
+      if (this.pendingSnapshot && this.latestSlotSnapshotTimestamp(next) !== this.pendingSnapshot.previousTimestamp) {
+        window.clearTimeout(this.pendingSnapshot.timeout);
+        const resolve = this.pendingSnapshot.resolve;
+        this.pendingSnapshot = undefined;
+        resolve(next);
+      }
+      if (this.recording() && this.recordingBattleSlot != null) {
+        const latestBattle = this.latestBattleMarker(next, this.recordingBattleSlot);
+        if (latestBattle != null && latestBattle !== this.recordingBattleMarker) this.stopRecording();
+      }
       const selected = this.selectedHero();
       if (!selected) return;
       const fresh = next.slots.flatMap(slot => slot.heroes as any[]).find(hero => this.heroIdentity(hero) === this.heroIdentity(selected));
-      if (fresh) this.selectedHero.set(fresh);
+      if (fresh) {
+        this.selectedHero.set(fresh);
+        if (this.recording() && this.isHeroDead(fresh)) this.stopRecording();
+      }
     };
   }
-  ngOnDestroy() { this.stream?.close(); if (this.tooltipFrame) cancelAnimationFrame(this.tooltipFrame); }
+  ngOnDestroy() {
+    this.stream?.close();
+    this.stopRecording();
+    if (this.pendingSnapshot) { window.clearTimeout(this.pendingSnapshot.timeout); this.pendingSnapshot.resolve(null); this.pendingSnapshot = undefined; }
+    document.removeEventListener('pointermove', this.nativePointerMove);
+    if (this.tooltipFrame) cancelAnimationFrame(this.tooltipFrame);
+  }
   slotBattles(slot: number): TelemetryEvent[] { return this.state().battles.filter(battle => Number((battle as any).payload?.battleIndex) === slot); }
   trackBattle(index: number, battle: TelemetryEvent): string {
     return String(battle.timestamp ?? `${(battle as any).payload?.battleIndex ?? 'slot'}-${index}`);
@@ -336,16 +413,84 @@ class AppComponent implements OnInit, OnDestroy {
     return rate >= 100 ? Math.round(rate).toLocaleString('en-US') : rate.toLocaleString('en-US', { maximumFractionDigits: 1 });
   }
   trackStat(_index: number, stat: any): string { return String(stat?.id ?? stat?.key); }
+  trackTimelineEntry(_index: number, entry: CombatTimelineEntry): number { return entry.id; }
+  timelinePosition(index: number): number {
+    const count = this.timelineEntries().length;
+    return count <= 1 ? 0 : index * 100 / (count - 1);
+  }
+  timelineEntryLabel(entry: CombatTimelineEntry, index: number): string { return `Snapshot ${index + 1} at ${new Date(entry.capturedAt).toLocaleTimeString()}`; }
+  selectedTimelineEntry(): CombatTimelineEntry | null {
+    const id = this.selectedTimelineId();
+    return id == null ? null : this.timelineEntries().find(entry => entry.id === id) ?? null;
+  }
+  selectTimelineEntry(id: number) { this.hideTooltips(); this.selectedTimelineId.set(id); }
+  private selectedTimelineIndex(): number {
+    const selectedId = this.selectedTimelineId();
+    return selectedId == null ? -1 : this.timelineEntries().findIndex(entry => entry.id === selectedId);
+  }
+  hasPreviousTimelineEntry(): boolean { return this.selectedTimelineIndex() > 0; }
+  hasNextTimelineEntry(): boolean {
+    const index = this.selectedTimelineIndex();
+    return index >= 0 && index < this.timelineEntries().length - 1;
+  }
+  moveTimelineSelection(offset: -1 | 1) {
+    const entries = this.timelineEntries();
+    const nextIndex = this.selectedTimelineIndex() + offset;
+    if (nextIndex >= 0 && nextIndex < entries.length) this.selectTimelineEntry(entries[nextIndex].id);
+  }
+  clearTimeline() { this.hideTooltips(); this.timelineEntries.set([]); this.selectedTimelineId.set(null); }
+  trackEffect(index: number, effect: any): string { return String(effect?._uiKey ?? `${effect?.id ?? 'unknown'}:${effect?.sourceHeroId ?? effect?.sourceName ?? 'unknown'}:${index}`); }
+  effectKey(effect: any): string { return String(effect?._uiKey ?? `${effect?.id ?? 'unknown'}:${effect?.sourceHeroId ?? effect?.sourceName ?? 'unknown'}`); }
+  displayedCombatEffects(hero: any): any[] {
+    const selected = this.selectedTimelineEntry();
+    return selected ? selected.effects : (Array.isArray(hero?.combatEffects) ? hero.combatEffects : []);
+  }
+  combatEffectGroups(hero: any): Array<{ label: string; classification: string; effects: any[] }> {
+    const effects = this.displayedCombatEffects(hero).map((rawEffect, index) => {
+      const effect = rawEffect;
+      return {
+      ...effect,
+      _uiKey: `${effect?.id ?? 'unknown'}:${effect?.sourceHeroId ?? effect?.sourceName ?? 'unknown'}:${index}`
+    }; });
+    return [
+      { label: 'Buffs', classification: 'buff', effects: effects.filter(effect => effect?.classification === 'buff') },
+      { label: 'Debuffs', classification: 'debuff', effects: effects.filter(effect => effect?.classification === 'debuff') },
+      { label: 'Other', classification: 'other', effects: effects.filter(effect => effect?.classification !== 'buff' && effect?.classification !== 'debuff') }
+    ];
+  }
+  effectTitle(effect: any): string {
+    const description = String(effect?.englishDescription || effect?.description || '');
+    const stackName = /^1\s+stack(?:\s+of)?\s+(.+)$/i.exec(description.trim())?.[1]?.trim();
+    return String(effect?.englishName || effect?.name || stackName || effect?.type || 'Effect');
+  }
+  effectSourceLabel(effect: any): string {
+    return String(effect?.sourceName || (effect?.originVerified ? effect?.sourceSkillName || effect?.originName : '') || 'Unknown');
+  }
+  effectIconUrl(effect: any): string | null { return effect?.iconUrl ? String(effect.iconUrl) : null; }
+  effectBorderClass(effect: any): string {
+    return effect?.classification === 'debuff' ? 'border-rose-800 hover:border-rose-400' : effect?.classification === 'buff' ? 'border-emerald-800 hover:border-emerald-400' : 'border-violet-800 hover:border-violet-400';
+  }
+  effectGroupLabelClass(classification: string): string {
+    return classification === 'debuff' ? 'text-rose-400' : classification === 'buff' ? 'text-emerald-400' : 'text-violet-400';
+  }
+  effectDuration(effect: any): string {
+    const duration = Number(effect?.duration), elapsed = Number(effect?.elapsedDuration);
+    if (!Number.isFinite(duration) || duration <= 0) return '';
+    const remaining = Number.isFinite(elapsed) ? Math.max(0, duration - elapsed) : duration;
+    return `${remaining.toFixed(1)}s remaining / ${duration.toFixed(1)}s`;
+  }
   statKey(stat: any, combat: boolean): string { return (combat ? 'combat:' : 'current:') + String(stat?.id ?? stat?.key); }
   heroStats(hero: any, combat: boolean): any[] {
     const currentStats = Array.isArray(hero?.stats) ? hero.stats : null;
-    if (combat && currentStats && Array.isArray(hero?.combatStats)) {
-      const combatByKey = new Map(hero.combatStats.map((stat: any) => [String(stat?.id ?? stat?.key), stat]));
+    const selectedStats = this.selectedTimelineEntry()?.stats;
+    const combatStats = selectedStats ?? hero?.combatStats;
+    if (combat && currentStats && Array.isArray(combatStats)) {
+      const combatByKey = new Map(combatStats.map((stat: any) => [String(stat?.id ?? stat?.key), stat]));
       return currentStats
         .map((stat: any) => combatByKey.get(String(stat?.id ?? stat?.key)))
         .filter((stat: any) => stat != null);
     }
-    const stats = combat ? hero?.combatStats : currentStats;
+    const stats = combat ? combatStats : currentStats;
     if (Array.isArray(stats)) return stats;
     return combat ? [] : Object.entries(hero?.attributes || {}).map(([key, value]) => ({ key, englishName: key, value }));
   }
@@ -370,6 +515,10 @@ class AppComponent implements OnInit, OnDestroy {
     return key.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/_/g, ' ').replace(/^./, value => value.toUpperCase());
   }
   private heroIdentity(hero: any): string { return String(hero?.uniqueId ?? hero?.id ?? hero?.name ?? ''); }
+  private isHeroDead(hero: any): boolean {
+    return hero?.isDead === true || (hero?.currentHealth != null && Number.isFinite(Number(hero.currentHealth)) && Number(hero.currentHealth) <= 0);
+  }
+  isSelectedHeroDead(): boolean { return this.isHeroDead(this.selectedHero()); }
   riftStarAverage(slot: number): string {
     const targetTitle = 'Rift-Star Expanse-15';
     const durations = this.slotBattles(slot)
@@ -391,41 +540,122 @@ class AppComponent implements OnInit, OnDestroy {
     const heroes = liveSlot?.heroes ?? (this.slotBattles(slot)[0] as any)?.payload?.heroes ?? [];
     return [...heroes].reverse();
   }
-  async refreshHeroes() {
+  async refreshHeroes(addToTimeline = false) {
+    if (addToTimeline) { await this.captureTimelineSnapshot(false, this.recordingSession); return; }
     this.refreshing.set(true);
     try { await fetch('/api/snapshot', { method: 'POST' }); }
     finally { window.setTimeout(() => this.refreshing.set(false), 700); }
   }
+  toggleRecording() {
+    if (this.recording()) { this.stopRecording(); return; }
+    const selected = this.selectedHero();
+    if (!selected) return;
+    if (this.isHeroDead(selected)) { this.stopRecording(); return; }
+    const slot = this.state().slots.find(entry => entry.heroes.some(hero => this.heroIdentity(hero) === this.heroIdentity(selected)))?.battleIndex;
+    if (slot == null) return;
+    this.recordingSession++;
+    const session = this.recordingSession;
+    this.recordingBattleSlot = Number(slot);
+    this.recordingBattleMarker = this.latestBattleMarker(this.state(), this.recordingBattleSlot);
+    this.recording.set(true);
+    void this.runRecordingLoop(session);
+  }
+  private stopRecording() {
+    this.recordingSession++;
+    this.recording.set(false);
+    this.recordingBattleSlot = null;
+    this.recordingBattleMarker = null;
+    if (this.recordingTimer != null) window.clearTimeout(this.recordingTimer);
+    this.recordingTimer = undefined;
+    this.recordingDelayResolve?.();
+    this.recordingDelayResolve = undefined;
+  }
+  private async runRecordingLoop(session: number) {
+    while (this.recording() && session === this.recordingSession) {
+      const startedAt = Date.now();
+      await this.captureTimelineSnapshot(true, session);
+      if (!this.recording() || session !== this.recordingSession) return;
+      await new Promise<void>(resolve => {
+        this.recordingDelayResolve = resolve;
+        this.recordingTimer = window.setTimeout(() => {
+          this.recordingTimer = undefined;
+          this.recordingDelayResolve = undefined;
+          resolve();
+        }, Math.max(0, 2000 - (Date.now() - startedAt)));
+      });
+    }
+  }
+  private captureTimelineSnapshot(recordingCapture: boolean, session: number): Promise<void> {
+    const task = this.captureQueue.then(() => this.performTimelineSnapshot(recordingCapture, session)).catch(() => undefined);
+    this.captureQueue = task;
+    return task;
+  }
+  private async performTimelineSnapshot(recordingCapture: boolean, session: number) {
+    if (recordingCapture && (!this.recording() || session !== this.recordingSession)) return;
+    const selected = this.selectedHero();
+    if (!selected) return;
+    this.refreshing.set(true);
+    try {
+      const previousSnapshot = this.latestSlotSnapshotTimestamp(this.state());
+      const snapshotState = new Promise<TelemetryState | null>(resolve => {
+        const timeout = window.setTimeout(() => {
+          if (this.pendingSnapshot?.resolve === resolve) this.pendingSnapshot = undefined;
+          resolve(null);
+        }, 10000);
+        this.pendingSnapshot = { previousTimestamp: previousSnapshot, resolve, timeout };
+      });
+      await fetch('/api/snapshot', { method: 'POST' });
+      const live = await snapshotState;
+      if (recordingCapture && (!this.recording() || session !== this.recordingSession)) return;
+      const hero = live?.slots.flatMap(slot => slot.heroes as any[]).find(candidate => this.heroIdentity(candidate) === this.heroIdentity(selected));
+      if (hero && this.isHeroDead(hero)) { if (recordingCapture) this.stopRecording(); return; }
+      if (!hero?.inCombat || !Array.isArray(hero?.combatStats)) return;
+      const entry: CombatTimelineEntry = {
+        id: Date.now(),
+        capturedAt: Date.now(),
+        stats: hero.combatStats.map((stat: any) => ({ ...stat })),
+        effects: (Array.isArray(hero.combatEffects) ? hero.combatEffects : []).map((effect: any) => ({ ...effect }))
+      };
+      this.timelineEntries.update(entries => [...entries, entry]);
+      this.selectedTimelineId.set(entry.id);
+    } finally {
+      this.refreshing.set(false);
+    }
+  }
+  private latestSlotSnapshotTimestamp(state: TelemetryState): string | null {
+    return state.snapshotUpdatedAt ?? null;
+  }
+  private latestBattleMarker(state: TelemetryState, slot: number): string | null {
+    const battle = state.battles.find(entry => Number((entry as any).payload?.battleIndex) === slot);
+    return battle?.timestamp ?? null;
+  }
   battleResultClass(result: unknown) { return String(result).toLowerCase().includes('win') ? 'bg-emerald-950 text-emerald-300' : 'bg-rose-950 text-rose-300'; }
-  openHero(hero: any) { this.selectedHero.set(hero); this.selectedHeroTab.set('talents'); }
-  closeHero() { this.selectedHero.set(null); this.hoveredTalent.set(null); this.hoveredStat.set(null); }
+  openHero(hero: any) { this.stopRecording(); this.clearTimeline(); this.selectedHero.set(hero); this.selectedHeroTab.set('talents'); }
+  closeHero() { this.stopRecording(); this.selectedHero.set(null); this.hideTooltips(); }
   async resetSlot(slot: number) {
     const response = await fetch('/api/battles/' + slot, { method: 'DELETE' });
     if (!response.ok) throw new Error('Could not reset battle history');
   }
-  @HostListener('document:pointermove', ['$event'])
-  onDocumentPointerMove(event: PointerEvent) {
-    if (!this.selectedHero()) return;
-    const target = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
-    const statRow = target?.closest<HTMLElement>('[data-stat-key]');
-    if (statRow) {
-      const [kind, id] = String(statRow.dataset['statKey']).split(':');
-      const stat = this.heroStats(this.selectedHero(), kind === 'combat').find(candidate => String(candidate?.id ?? candidate?.key) === id);
-      if (stat) { this.hoveredTalent.set(null); this.positionTooltip(event, stat, 'stat-tooltip', this.hoveredStat); return; }
-    }
-    const tile = target?.closest<HTMLElement>('[data-talent-id]');
-    if (!tile) { this.hideTalentTooltip(); return; }
-    const id = Number(tile.dataset['talentId']);
-    const talent = (this.selectedHero()?.talents || []).find((candidate: any) => Number(candidate?.id) === id);
-    if (!talent) { this.hideTalentTooltip(); return; }
-    this.hoveredStat.set(null);
-    this.positionTooltip(event, talent, 'talent-tooltip', this.hoveredTalent);
+  showEffectTooltip(event: PointerEvent, effect: any) {
+    this.hoveredTalent.set(null); this.hoveredStat.set(null); this.hoveredEffect.set(effect);
+    this.activeTooltipId = 'effect-tooltip'; this.positionTooltip(event, this.activeTooltipId);
+  }
+  showStatTooltip(event: PointerEvent, stat: any) {
+    this.hoveredTalent.set(null); this.hoveredEffect.set(null); this.hoveredStat.set(stat);
+    this.activeTooltipId = 'stat-tooltip'; this.positionTooltip(event, this.activeTooltipId);
+  }
+  showTalentTooltip(event: PointerEvent, talent: any) {
+    this.hoveredStat.set(null); this.hoveredEffect.set(null); this.hoveredTalent.set(talent);
+    this.activeTooltipId = 'talent-tooltip'; this.positionTooltip(event, this.activeTooltipId);
   }
   @HostListener('document:mouseleave')
   @HostListener('window:blur')
-  hideTalentTooltip() { if (this.tooltipFrame) cancelAnimationFrame(this.tooltipFrame); this.tooltipFrame = undefined; this.hoveredTalent.set(null); this.hoveredStat.set(null); }
-  private positionTooltip(event: PointerEvent, value: any, elementId: string, targetSignal: { (): any; set(value: any): void }) {
-    if (targetSignal() !== value) targetSignal.set(value);
+  hideTooltips() {
+    if (this.tooltipFrame) cancelAnimationFrame(this.tooltipFrame);
+    this.tooltipFrame = undefined; this.activeTooltipId = undefined;
+    this.hoveredTalent.set(null); this.hoveredStat.set(null); this.hoveredEffect.set(null);
+  }
+  private positionTooltip(event: PointerEvent, elementId: string) {
     const pointerX = event.clientX, pointerY = event.clientY;
     if (this.tooltipFrame) cancelAnimationFrame(this.tooltipFrame);
     this.tooltipFrame = requestAnimationFrame(() => {
