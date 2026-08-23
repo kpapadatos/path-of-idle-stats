@@ -10,7 +10,7 @@ const webRoot = join(root, 'dist', 'dashboard', 'browser');
 const iconRoot = join(root, 'data', 'icons');
 const snapshotRequest = 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\PathOfIdle\\BepInEx\\PathOfIdleStats\\snapshot.request';
 const clients = new Set();
-const state = { connected: false, updatedAt: null, heroes: [], slots: [], inventory: [], battles: [], events: [], catalogs: {} };
+const state = { connected: false, updatedAt: null, heroes: [], slots: [], resources: [], inventory: [], battles: [], events: [], catalogs: {} };
 await mkdir(dataDirectory, { recursive: true });
 
 function applyEvent(event) {
@@ -22,15 +22,17 @@ function applyEvent(event) {
   }
   if (event.type === 'snapshot.heroes') state.heroes = event.payload?.heroes ?? event.payload ?? [];
   if (event.type === 'snapshot.slots') state.slots = event.payload?.slots ?? [];
+  if (event.type === 'snapshot.resources') state.resources = event.payload?.resources ?? [];
   if (event.type === 'snapshot.inventory') state.inventory = event.payload?.items ?? event.payload ?? [];
   if (event.type.startsWith('catalog.')) state.catalogs[event.type.slice(8)] = event.payload?.entries ?? [];
   if (event.type === 'battle.ended') {
+    state.resources = event.payload?.resources ?? state.resources;
     state.battles.unshift(event);
     const perSlot = new Map();
     state.battles = state.battles.filter(battle => {
       const slot = Number(battle.payload?.battleIndex);
       const count = perSlot.get(slot) ?? 0;
-      if (count >= 15) return false;
+      if (count >= 50) return false;
       perSlot.set(slot, count + 1);
       return true;
     });

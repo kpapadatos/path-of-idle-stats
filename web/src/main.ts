@@ -9,6 +9,7 @@ type TelemetryState = {
   updatedAt: string | null;
   heroes: unknown[];
   slots: Array<{ battleIndex: number; heroes: unknown[] }>;
+  resources: unknown[];
   inventory: unknown[];
   battles: TelemetryEvent[];
   events: TelemetryEvent[];
@@ -21,12 +22,10 @@ type TelemetryState = {
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [CommonModule],
   template: `
-    <main class="mx-auto max-w-7xl p-5 md:p-8">
-      <header class="mb-8 flex flex-wrap items-end justify-between gap-4">
+    <main class="mx-auto max-w-7xl p-3 md:p-5">
+      <header class="mb-4 flex flex-wrap items-end justify-between gap-3">
         <div>
-          <p class="mb-2 text-xs font-semibold uppercase tracking-[0.25em] text-amber-400">Local telemetry</p>
-          <h1 class="text-3xl font-semibold tracking-tight">Path of Idle Stats</h1>
-          <p class="mt-2 text-sm text-zinc-400">Heroes, equipment and battle outcomes as the game reports them.</p>
+          <h1 class="text-3xl font-semibold tracking-tight">Path of Idle Copilot</h1>
         </div>
         <div class="flex items-center gap-2">
           <button type="button" (click)="refreshHeroes()" [disabled]="refreshing()" class="rounded-full border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-300 hover:border-amber-700 disabled:opacity-50">{{ refreshing() ? 'Requested…' : 'Refresh heroes' }}</button>
@@ -36,26 +35,30 @@ type TelemetryState = {
         </div>
       </header>
 
-      <section class="space-y-5">
-        <article *ngFor="let slot of battleSlots" class="rounded-2xl border border-zinc-700 bg-gradient-to-br from-zinc-900 to-zinc-950 p-5 shadow-xl shadow-black/20">
-          <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <button type="button" *ngFor="let position of heroPositions" (click)="slotHeroes(slot)[position] && openHero(slotHeroes(slot)[position])" class="min-h-28 rounded-xl border border-zinc-800 bg-zinc-900/80 p-4 text-left transition hover:border-amber-700 hover:bg-zinc-900">
+      <section class="mb-3 grid grid-cols-3 gap-2" aria-label="Primary resources">
+        <article *ngFor="let resource of primaryResources(); trackBy: trackResource" [attr.aria-label]="resourceTitle($any(resource)) + ': ' + resourceCount($any(resource))" class="flex items-center justify-center gap-2 rounded-xl border border-zinc-800 bg-zinc-900/80 px-3 py-2">
+          <img *ngIf="$any(resource).iconUrl" [src]="$any(resource).iconUrl" class="h-7 w-7 object-contain" alt="">
+          <p class="font-mono text-sm font-semibold text-zinc-100">{{ resourceCount($any(resource)) }}</p>
+        </article>
+      </section>
+
+      <section class="space-y-3">
+        <article *ngFor="let slot of battleSlots" class="rounded-2xl border border-zinc-700 bg-gradient-to-br from-zinc-900 to-zinc-950 p-3 shadow-xl shadow-black/20">
+          <div class="grid grid-cols-1 gap-2 sm:grid-cols-3">
+            <button type="button" *ngFor="let position of heroPositions" (click)="slotHeroes(slot)[position] && openHero(slotHeroes(slot)[position])" class="min-h-14 rounded-xl border border-zinc-800 bg-zinc-900/80 px-3 py-2 text-left transition hover:border-amber-700 hover:bg-zinc-900">
               <ng-container *ngIf="slotHeroes(slot)[position] as hero; else emptyHero">
-                <div class="min-w-0">
-                    <p class="truncate font-medium text-zinc-100">{{ $any(hero).name || 'Unnamed hero' }}</p>
-                    <div class="mt-1 flex items-center gap-1.5 text-sm">
-                      <img [src]="$any(hero).classIconUrl || classIconUrl($any(hero).jobId)" class="h-5 w-5 object-contain" alt="">
-                      <span class="truncate text-amber-300">{{ $any(hero).englishJob || $any(hero).job || 'Unknown class' }}</span>
-                    </div>
-                    <p class="mt-1 text-xs text-zinc-500">Lv. {{ $any(hero).level ?? '?' }}</p>
+                <div class="flex min-w-0 items-center gap-2 text-sm">
+                    <img [src]="$any(hero).classIconUrl || classIconUrl($any(hero).jobId)" class="h-5 w-5 shrink-0 object-contain" alt="">
+                    <p class="min-w-0 flex-1 truncate font-medium text-zinc-100">{{ $any(hero).name || 'Unnamed hero' }}</p>
+                    <span class="shrink-0 text-xs text-zinc-500">Lv. {{ $any(hero).level ?? '?' }}</span>
                 </div>
               </ng-container>
-              <ng-template #emptyHero><div class="flex h-20 items-center justify-center text-sm text-zinc-700">Empty hero slot</div></ng-template>
+              <ng-template #emptyHero><div class="flex h-8 items-center justify-center text-sm text-zinc-700">Empty hero slot</div></ng-template>
             </button>
           </div>
 
-          <details class="group mt-4 rounded-xl border border-zinc-800 bg-zinc-950/70">
-            <summary class="flex cursor-pointer list-none items-center justify-between p-4 text-sm font-medium text-zinc-300">
+          <details class="group mt-3 rounded-xl border border-zinc-800 bg-zinc-950/70">
+            <summary class="flex cursor-pointer list-none items-center justify-between px-3 py-2.5 text-sm font-medium text-zinc-300">
               <span>Battle history ({{ slotBattles(slot).length }}) - Rift-Star Expanse-15 Avg. Time: {{ riftStarAverage(slot) }}</span>
               <span class="ml-4 flex shrink-0 items-center gap-3">
                 <button type="button" (click)="$event.preventDefault(); $event.stopPropagation(); resetSlot(slot)" [disabled]="!slotBattles(slot).length" class="rounded-lg border border-rose-900 bg-rose-950/50 px-3 py-1.5 text-xs text-rose-300 hover:bg-rose-950 disabled:cursor-not-allowed disabled:opacity-40">Reset history</button>
@@ -85,6 +88,18 @@ type TelemetryState = {
             </div>
           </details>
         </article>
+      </section>
+
+      <section class="mt-3 rounded-2xl border border-zinc-700 bg-zinc-950 p-3">
+        <div class="mb-3 flex items-end justify-between gap-3"><div><h2 class="font-semibold text-zinc-100">Loot speed</h2><p class="text-xs text-zinc-500">Combined hourly rate across the retained battle history.</p></div><span class="text-xs text-zinc-600">{{ state().battles.length }} battles</span></div>
+        <div *ngIf="lootRates().length; else noLootRates" class="grid grid-cols-2 gap-1.5">
+          <article *ngFor="let item of lootRates(); trackBy: trackLootRate" class="flex min-w-0 items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900/70 px-2 py-1">
+            <img *ngIf="$any(item).iconUrl" [src]="$any(item).iconUrl" class="h-6 w-6 shrink-0 object-contain" alt="">
+            <p class="min-w-0 flex-1 truncate text-sm text-zinc-300">{{ $any(item).englishName || $any(item).name || 'Unknown item' }}</p>
+            <span class="shrink-0 font-mono text-sm font-semibold text-amber-300">{{ lootRateLabel($any(item).perHour) }}/h</span>
+          </article>
+        </div>
+        <ng-template #noLootRates><p class="py-4 text-center text-sm text-zinc-600">Waiting for completed battles with loot.</p></ng-template>
       </section>
 
       <div *ngIf="selectedHero() as hero" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" (click)="closeHero()">
@@ -200,7 +215,7 @@ class AppComponent implements OnInit, OnDestroy {
   readonly hoveredTalent = signal<any | null>(null);
   readonly hoveredStat = signal<any | null>(null);
   readonly refreshing = signal(false);
-  readonly state = signal<TelemetryState>({ connected: false, updatedAt: null, heroes: [], slots: [], inventory: [], battles: [], events: [], catalogs: {} });
+  readonly state = signal<TelemetryState>({ connected: false, updatedAt: null, heroes: [], slots: [], resources: [], inventory: [], battles: [], events: [], catalogs: {} });
   readonly status = signal('Connecting');
   private stream?: EventSource;
   private tooltipFrame?: number;
@@ -248,6 +263,50 @@ class AppComponent implements OnInit, OnDestroy {
     }
     return result;
   }
+  primaryResources(): any[] {
+    const live = new Map((this.state().resources || []).map((resource: any) => [Number(resource?.id), resource]));
+    const definitions = new Map((this.state().catalogs?.['materials'] || []).map((resource: any) => [Number(resource?.id), resource]));
+    return [1, 2, 3].map(id => ({ ...(definitions.get(id) || {}), ...(live.get(id) || {}), id }));
+  }
+  trackResource(_index: number, resource: any): number { return Number(resource?.id); }
+  resourceTitle(resource: any): string {
+    if (Number(resource?.id) === 3) return 'Bones';
+    return String(resource?.englishName || resource?.name || ({ 1: 'Gold', 2: 'Blood' } as Record<number, string>)[Number(resource?.id)] || 'Resource');
+  }
+  resourceCount(resource: any): string {
+    const count = Number(resource?.count);
+    return Number.isFinite(count) ? Math.floor(count).toLocaleString('en-US') : '—';
+  }
+  lootRates(): any[] {
+    const durationBySlot = new Map<number, number>();
+    const itemByKey = new Map<string, any>();
+    const countsByKeyAndSlot = new Map<string, Map<number, number>>();
+    for (const battle of this.state().battles) {
+      const payload = (battle as any)?.payload || {};
+      const slot = Number(payload.battleIndex);
+      const duration = Number(payload.durationSeconds);
+      if (!Number.isFinite(slot) || !Number.isFinite(duration) || duration <= 0) continue;
+      durationBySlot.set(slot, (durationBySlot.get(slot) || 0) + duration);
+      for (const item of this.battleLoot(battle)) {
+        const key = `${item?.type || 'item'}:${item?.id ?? item?.englishName ?? item?.name}`;
+        itemByKey.set(key, item);
+        const counts = countsByKeyAndSlot.get(key) || new Map<number, number>();
+        counts.set(slot, (counts.get(slot) || 0) + Number(item?.count || 0));
+        countsByKeyAndSlot.set(key, counts);
+      }
+    }
+    return [...itemByKey.entries()].map(([key, item]) => {
+      const perHour = [...(countsByKeyAndSlot.get(key) || new Map()).entries()]
+        .reduce((rate, [slot, count]) => rate + Number(count) * 3600 / Number(durationBySlot.get(Number(slot)) || Infinity), 0);
+      return { ...item, key, perHour };
+    }).filter(item => Number.isFinite(item.perHour) && item.perHour > 0)
+      .sort((left, right) => right.perHour - left.perHour);
+  }
+  trackLootRate(_index: number, item: any): string { return String(item?.key); }
+  lootRateLabel(rate: number): string {
+    if (!Number.isFinite(rate)) return '—';
+    return rate >= 100 ? Math.round(rate).toLocaleString('en-US') : rate.toLocaleString('en-US', { maximumFractionDigits: 1 });
+  }
   trackStat(_index: number, stat: any): string { return String(stat?.id ?? stat?.key); }
   statKey(stat: any, combat: boolean): string { return (combat ? 'combat:' : 'current:') + String(stat?.id ?? stat?.key); }
   heroStats(hero: any, combat: boolean): any[] {
@@ -287,7 +346,7 @@ class AppComponent implements OnInit, OnDestroy {
     const targetTitle = 'Rift-Star Expanse-15';
     const durations = this.slotBattles(slot)
       .filter(battle => this.battlePlaceTitle((battle as any).payload) === targetTitle)
-      .slice(0, 10)
+      .slice(0, 50)
       .map(battle => Number((battle as any).payload?.durationSeconds))
       .filter(duration => Number.isFinite(duration));
     if (!durations.length) return 'n/a';

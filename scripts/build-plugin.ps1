@@ -7,11 +7,16 @@ $RuntimeDirectory = Join-Path $ProjectDirectory 'work\bepinex\dotnet'
 $CoreDirectory = Join-Path $ProjectDirectory 'work\bepinex\BepInEx\core'
 $GameInteropDirectory = 'C:\Program Files (x86)\Steam\steamapps\common\PathOfIdle\BepInEx\interop'
 $SourcePath = Join-Path $ProjectDirectory 'plugin\Plugin.cs'
-$OutputDirectory = 'C:\Users\ances\Documents\Codex\2026-08-23\pat\work\plugin-build'
+$OutputDirectory = Join-Path $ProjectDirectory 'plugin\bin\Release\net6.0'
 $OutputPath = Join-Path $OutputDirectory $OutputFile
-$Compiler = Join-Path $env:ProgramFiles 'dotnet\sdk\7.0.401\Roslyn\bincore\csc.dll'
+$dotnetRoot = Join-Path $env:ProgramFiles 'dotnet'
+$Compiler = Get-ChildItem -LiteralPath (Join-Path $dotnetRoot 'sdk') -Directory -ErrorAction SilentlyContinue |
+    Sort-Object { [version]$_.Name } -Descending |
+    ForEach-Object { Join-Path $_.FullName 'Roslyn\bincore\csc.dll' } |
+    Where-Object { Test-Path -LiteralPath $_ } |
+    Select-Object -First 1
 
-if (-not (Test-Path -LiteralPath $Compiler)) { throw "C# compiler not found: $Compiler" }
+if (-not $Compiler) { throw 'C# compiler not found. Install a current .NET SDK, then try again.' }
 if (-not (Test-Path -LiteralPath $RuntimeDirectory)) { throw 'Staged BepInEx .NET runtime is missing.' }
 
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null

@@ -4,8 +4,7 @@ param()
 $ErrorActionPreference = 'Stop'
 $ProjectDirectory = Split-Path -Parent $PSScriptRoot
 $ManifestPath = Join-Path $ProjectDirectory 'install-manifest.json'
-$builtSource = 'C:\Users\ances\Documents\Codex\2026-08-23\pat\work\plugin-build\PathOfIdleStats.dll'
-$Source = if (Test-Path -LiteralPath $builtSource) { $builtSource } else { Join-Path $ProjectDirectory 'plugin\bin\Release\net6.0\PathOfIdleStats.dll' }
+$Source = Join-Path $ProjectDirectory 'plugin\bin\Release\net6.0\PathOfIdleStats.dll'
 
 if (Get-Process -Name PathOfIdle -ErrorAction SilentlyContinue) {
     throw 'Path of Idle is running. Close it normally before updating the plugin.'

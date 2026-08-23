@@ -83,6 +83,7 @@ public sealed class Plugin : BasePlugin
         ExportPendingIcons(32);
         Instance?.writer?.Enqueue("snapshot.slots", new { slots });
         Instance?.writer?.Enqueue("snapshot.heroes", new { heroes = allHeroes });
+        Instance?.writer?.Enqueue("snapshot.resources", new { resources = DescribePrimaryResources() });
     }
 
     public override bool Unload()
@@ -174,6 +175,7 @@ public sealed class Plugin : BasePlugin
             enemyCount = capture.Enemies.Count,
             enemies = capture.Enemies,
             loot = AggregateLoot(ReadList(Read(__instance, "dropItemList")).Select(DescribeItem)),
+            resources = DescribePrimaryResources(),
             heroes
         });
         Instance?.writer?.Enqueue("snapshot.heroes", new { heroes });
@@ -255,14 +257,22 @@ public sealed class Plugin : BasePlugin
     {
         var save = Read(item, "saveItemData") ?? item;
         var equip = Read(item, "itemEquipData");
-        var icon = ReadString(item, "iconStr") ?? ReadString(Read(equip, "tEquipData"), "icon")
+        var definition = Read(equip, "tEquipData")
+            ?? Read(Read(item, "itemRuneData"), "tRuneData")
+            ?? Read(Read(item, "itemResData"), "tResData")
+            ?? Read(Read(item, "itemToolData"), "tToolData")
+            ?? Read(Read(item, "itemCurioData"), "tCurioData")
+            ?? Read(item, "tItemData");
+        var runtimeName = InvokeString(item, "GetName");
+        var specificName = ReadString(definition, "name") ?? runtimeName;
+        var icon = ReadString(item, "iconStr") ?? ReadString(definition, "icon")
             ?? ReadString(Read(item, "itemRuneData"), "icon") ?? ReadString(Read(item, "itemResData"), "icon");
         QueueIcon(icon);
         return new()
         {
             ["id"] = ReadNullableInt(save, "id"),
-            ["name"] = InvokeString(item, "GetName") ?? ReadString(Read(equip, "tEquipData"), "name"),
-            ["englishName"] = EnglishName(Read(equip, "tEquipData") ?? Read(item, "tItemData"), InvokeString(item, "GetName")),
+            ["name"] = specificName,
+            ["englishName"] = EnglishName(definition, specificName),
             ["type"] = Read(save, "type")?.ToString(), ["count"] = ReadNullableInt(save, "count"),
             ["quality"] = ReadNullableInt(save, "quality"), ["qualityName"] = ReadString(Read(item, "tItemQualityData"), "name"),
             ["level"] = ReadNullableInt(save, "level"), ["forgeLevel"] = ReadNullableInt(save, "forgeLevel"),
@@ -297,6 +307,33 @@ public sealed class Plugin : BasePlugin
             result.Add(copy);
         }
         return result;
+    }
+
+    private static List<Dictionary<string, object?>> DescribePrimaryResources()
+    {
+        var result = new List<Dictionary<string, object?>>();
+        var dataManager = GameType("Game")?.GetProperty("dataMgr", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+        var town = Read(Read(dataManager, "nowSeasonData"), "townData");
+        foreach (var resource in ReadValues(Read(town, "resDic")))
+        {
+            var save = Read(resource, "saveResData");
+            var definition = Read(resource, "tResData");
+            var id = ReadNullableInt(save, "id") ?? ReadNullableInt(definition, "id");
+            if (id is not (1 or 2 or 3)) continue;
+            var name = ReadString(definition, "name");
+            var icon = ReadString(definition, "icon");
+            QueueIcon(icon);
+            result.Add(new Dictionary<string, object?>
+            {
+                ["id"] = id,
+                ["count"] = ReadNullableInt(save, "count") ?? 0,
+                ["name"] = name,
+                ["englishName"] = EnglishName(definition, name),
+                ["iconKey"] = icon,
+                ["iconUrl"] = IconUrl(icon)
+            });
+        }
+        return result.OrderBy(resource => Convert.ToInt32(resource["id"], CultureInfo.InvariantCulture)).ToList();
     }
 
     private static Dictionary<string, object?> DescribeAttributes(object? attrData)
