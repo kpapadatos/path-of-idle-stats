@@ -27,7 +27,7 @@ public sealed class Plugin : BasePlugin
 
     private static Plugin? Instance;
     private static readonly object StateLock = new();
-    private static readonly Dictionary<nint, Dictionary<string, object?>> EffectOrigins = new();
+    private static readonly Dictionary<nint, EffectOriginRecord> EffectOrigins = new();
     [ThreadStatic] private static object? currentEffectSkill;
     private static readonly Dictionary<int, BattleCapture> Battles = new();
     private static readonly Queue<string> PendingIcons = new();
@@ -51,6 +51,7 @@ public sealed class Plugin : BasePlugin
         Patch("Root", "Update", nameof(RootUpdatePostfix));
         PatchWithContext("TriggerResultData", "DoAbility", nameof(AbilityResultPrefix), nameof(AbilityResultFinalizer));
         Patch("ComAbilityData", "AddAbility", nameof(AbilityAddedPostfix));
+        Patch("AbilityData", "Remove", nameof(AbilityRemovedPrefix));
         writer.Enqueue("heartbeat", new { pluginVersion = PluginVersion, mode = "live" });
         Log.LogInfo($"{PluginName} {PluginVersion} loaded with read-only telemetry hooks.");
     }
@@ -124,23 +125,40 @@ public sealed class Plugin : BasePlugin
         Log.LogInfo($"Hooked {typeName}.{methodName} effect context");
     }
 
-    private static void AbilityResultPrefix(object __instance)
-        => currentEffectSkill = Read(Read(__instance, "triggerData"), "skillData");
-
-    private static Exception? AbilityResultFinalizer(Exception? __exception)
+    private static void AbilityResultPrefix(object __instance, out object? __state)
     {
-        currentEffectSkill = null;
+        __state = currentEffectSkill;
+        currentEffectSkill = Read(Read(__instance, "triggerData"), "skillData");
+    }
+
+    private static Exception? AbilityResultFinalizer(Exception? __exception, object? __state)
+    {
+        currentEffectSkill = __state;
         return __exception;
     }
 
     private static void AbilityAddedPostfix(object? __result)
     {
-        if (__result is null || currentEffectSkill is null) return;
+        if (__result is null) return;
         var pointer = NativePointer(__result);
         if (pointer == 0) return;
+
+        // AddAbility may return an object at an address previously used by an expired
+        // ability. Invalidate that address on every add, even when no source skill
+        // context is available; missing provenance is safer than stale provenance.
+        lock (StateLock) EffectOrigins.Remove(pointer);
+        if (currentEffectSkill is null) return;
+
         var origin = DescribeSkillOrigin(currentEffectSkill, ReadNullableInt(Read(currentEffectSkill, "tSkillData"), "id"), Read(currentEffectSkill, "ownCombatData"));
         origin["originKind"] = "skill";
-        lock (StateLock) EffectOrigins[pointer] = origin;
+        lock (StateLock) EffectOrigins[pointer] = EffectOriginRecord.Capture(__result, origin);
+    }
+
+    private static void AbilityRemovedPrefix(object __instance)
+    {
+        var pointer = NativePointer(__instance);
+        if (pointer == 0) return;
+        lock (StateLock) EffectOrigins.Remove(pointer);
     }
 
     private static void BattleCreatedPostfix(object? __result) => SafeHook("battle-created", () =>
@@ -411,9 +429,16 @@ public sealed class Plugin : BasePlugin
                 return origin;
             }
         }
+        var abilityPointer = NativePointer(ability);
         lock (StateLock)
-            if (EffectOrigins.TryGetValue(NativePointer(ability), out var capturedOrigin))
-                return new Dictionary<string, object?>(capturedOrigin);
+        {
+            if (!EffectOrigins.TryGetValue(abilityPointer, out var capturedOrigin)) return null;
+            if (capturedOrigin.Matches(ability)) return new Dictionary<string, object?>(capturedOrigin.Origin);
+
+            // IL2CPP can reuse a destroyed object's native address. Never let provenance
+            // captured for the previous object leak into the new effect at that address.
+            EffectOrigins.Remove(abilityPointer);
+        }
         return null;
     }
 
@@ -940,6 +965,38 @@ public sealed class Plugin : BasePlugin
         public DateTimeOffset StartedAt { get; }
         public List<Dictionary<string, object?>> Enemies { get; } = new();
         public List<Dictionary<string, object?>> Loot { get; } = new();
+    }
+
+    private sealed class EffectOriginRecord
+    {
+        private EffectOriginRecord(object ability, Dictionary<string, object?> origin)
+        {
+            Origin = new Dictionary<string, object?>(origin);
+            DefinitionPointer = NativePointer(Read(ability, "tAbilityData")!);
+            DefinitionId = ReadNullableInt(Read(ability, "tAbilityData"), "id");
+            RuntimeId = ReadNullableInt(ability, "id");
+            SourcePointer = NativePointer(Read(ability, "fromCombatData")!);
+            TargetPointer = NativePointer(Read(ability, "ownCombatData")!);
+        }
+
+        public Dictionary<string, object?> Origin { get; }
+        private nint DefinitionPointer { get; }
+        private int? DefinitionId { get; }
+        private int? RuntimeId { get; }
+        private nint SourcePointer { get; }
+        private nint TargetPointer { get; }
+
+        public static EffectOriginRecord Capture(object ability, Dictionary<string, object?> origin) => new(ability, origin);
+
+        public bool Matches(object ability)
+        {
+            var definition = Read(ability, "tAbilityData");
+            return DefinitionPointer == NativePointer(definition!)
+                && DefinitionId == ReadNullableInt(definition, "id")
+                && RuntimeId == ReadNullableInt(ability, "id")
+                && SourcePointer == NativePointer(Read(ability, "fromCombatData")!)
+                && TargetPointer == NativePointer(Read(ability, "ownCombatData")!);
+        }
     }
 }
 

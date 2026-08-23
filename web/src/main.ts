@@ -181,16 +181,11 @@ type TelemetryState = {
               </div>
             </section>
             <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
-              <div class="flex min-w-0 flex-1 flex-wrap items-center gap-x-4 gap-y-2">
-                <ng-container *ngFor="let group of combatEffectGroups(); trackBy: trackEffectGroup">
-                  <div *ngIf="group.effects.length" class="flex items-center gap-1.5">
-                    <span class="mr-1 text-[10px] font-semibold uppercase tracking-wider" [class]="effectGroupLabelClass(group.classification)">{{ group.label }}</span>
-                    <button *ngFor="let effect of group.effects; trackBy: trackEffect" type="button" [attr.data-effect-key]="effectKey($any(effect))" (pointerenter)="showEffectTooltip($event, $any(effect))" (pointerleave)="hideTooltips()" class="relative h-9 w-9 rounded-lg border bg-zinc-950 p-1" [class]="effectBorderClass($any(effect))" [attr.aria-label]="effectTitle($any(effect))">
-                      <img *ngIf="effectIconUrl($any(effect)) as effectIcon" [src]="effectIcon" class="h-full w-full object-contain" alt="">
-                      <span *ngIf="$any(effect).stacks > 1" class="absolute -bottom-1.5 -right-1.5 min-w-4 rounded-full border border-zinc-700 bg-zinc-950 px-1 text-center text-[9px] font-bold text-zinc-100">{{ $any(effect).stacks }}</span>
-                    </button>
-                  </div>
-                </ng-container>
+              <div class="flex min-w-0 flex-1 flex-wrap items-center gap-x-1.5 gap-y-2">
+                <button *ngFor="let effect of combatEffects(); trackBy: trackEffect" type="button" [attr.data-effect-key]="effectKey($any(effect))" (pointerenter)="showEffectTooltip($event, $any(effect))" (pointerleave)="hideTooltips()" class="relative h-9 w-9 rounded-lg border bg-zinc-950 p-1" [class]="effectBorderClass($any(effect))" [attr.aria-label]="effectTitle($any(effect))">
+                  <img *ngIf="effectIconUrl($any(effect)) as effectIcon" [src]="effectIcon" class="h-full w-full object-contain" alt="">
+                  <span *ngIf="$any(effect).stacks > 1" class="absolute -bottom-1.5 -right-1.5 min-w-4 rounded-full border border-zinc-700 bg-zinc-950 px-1 text-center text-[9px] font-bold text-zinc-100">{{ $any(effect).stacks }}</span>
+                </button>
                 <span *ngIf="!hasCombatEffects()" class="text-xs text-zinc-600">No active effects captured</span>
               </div>
               <div class="flex shrink-0 items-center gap-2">
@@ -270,7 +265,7 @@ class AppComponent implements OnInit, OnDestroy {
   readonly recording = signal(false);
   readonly timelineEntries = signal<CombatTimelineEntry[]>([]);
   readonly selectedTimelineId = signal<number | null>(null);
-  readonly combatEffectGroups = computed<Array<{ label: string; classification: string; effects: any[] }>>(() => {
+  readonly combatEffects = computed<any[]>(() => {
     const selected = this.selectedTimelineEntry();
     const hero = this.selectedHero();
     const source = selected ? selected.effects : (Array.isArray(hero?.combatEffects) ? hero.combatEffects : []);
@@ -279,12 +274,12 @@ class AppComponent implements OnInit, OnDestroy {
       _uiKey: `${effect?.definitionId ?? effect?.id ?? 'unknown'}:${effect?.runtimeId ?? 'unknown'}:${effect?.sourceHeroId ?? effect?.sourceName ?? 'unknown'}:${effect?.sourceSkillId ?? effect?.originName ?? 'unknown'}:${effect?.level ?? 'unknown'}:${index}`
     }));
     return [
-      { label: 'Buffs', classification: 'buff', effects: effects.filter((effect: any) => effect?.classification === 'buff') },
-      { label: 'Debuffs', classification: 'debuff', effects: effects.filter((effect: any) => effect?.classification === 'debuff') },
-      { label: 'Other', classification: 'other', effects: effects.filter((effect: any) => effect?.classification !== 'buff' && effect?.classification !== 'debuff') }
+      ...effects.filter((effect: any) => effect?.classification === 'buff'),
+      ...effects.filter((effect: any) => effect?.classification === 'debuff'),
+      ...effects.filter((effect: any) => effect?.classification !== 'buff' && effect?.classification !== 'debuff')
     ];
   });
-  readonly hasCombatEffects = computed(() => this.combatEffectGroups().some(group => group.effects.length > 0));
+  readonly hasCombatEffects = computed(() => this.combatEffects().length > 0);
   readonly state = signal<TelemetryState>({ connected: false, gameRunning: false, updatedAt: null, heroes: [], slots: [], resources: [], sanctum: null, inventory: [], battles: [], events: [], catalogs: {} });
   readonly status = signal('Connecting');
   private stream?: EventSource;
@@ -467,7 +462,6 @@ class AppComponent implements OnInit, OnDestroy {
   }
   clearTimeline() { this.hideTooltips(); this.timelineEntries.set([]); this.selectedTimelineId.set(null); }
   trackEffect(index: number, effect: any): string { return String(effect?._uiKey ?? `${effect?.id ?? 'unknown'}:${effect?.sourceHeroId ?? effect?.sourceName ?? 'unknown'}:${index}`); }
-  trackEffectGroup(_index: number, group: { classification: string }): string { return group.classification; }
   effectKey(effect: any): string { return String(effect?._uiKey ?? `${effect?.id ?? 'unknown'}:${effect?.sourceHeroId ?? effect?.sourceName ?? 'unknown'}`); }
   effectTitle(effect: any): string {
     const description = String(effect?.englishDescription || effect?.description || '');
@@ -486,9 +480,6 @@ class AppComponent implements OnInit, OnDestroy {
   effectIconUrl(effect: any): string | null { return effect?.iconUrl ? String(effect.iconUrl) : null; }
   effectBorderClass(effect: any): string {
     return effect?.classification === 'debuff' ? 'border-rose-800 hover:border-rose-400' : effect?.classification === 'buff' ? 'border-emerald-800 hover:border-emerald-400' : 'border-violet-800 hover:border-violet-400';
-  }
-  effectGroupLabelClass(classification: string): string {
-    return classification === 'debuff' ? 'text-rose-400' : classification === 'buff' ? 'text-emerald-400' : 'text-violet-400';
   }
   effectDuration(effect: any): string {
     const duration = Number(effect?.duration), elapsed = Number(effect?.elapsedDuration);
