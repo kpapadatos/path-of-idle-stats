@@ -1,6 +1,6 @@
 import 'zone.js';
 import { CommonModule } from '@angular/common';
-import { ChangeDetectionStrategy, Component, HostListener, NgZone, OnDestroy, OnInit, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, HostListener, NgZone, OnDestroy, OnInit, signal } from '@angular/core';
 import { bootstrapApplication } from '@angular/platform-browser';
 
 type TelemetryEvent = { type: string; timestamp?: string; payload?: unknown } & Record<string, unknown>;
@@ -126,8 +126,8 @@ type TelemetryState = {
           </header>
 
           <nav class="mt-5 flex shrink-0 gap-1 border-b border-zinc-800" role="tablist" aria-label="Hero details">
-            <button type="button" role="tab" (click)="selectedHeroTab.set('talents')" [attr.aria-selected]="selectedHeroTab() === 'talents'" class="border-b-2 px-4 py-2 text-sm font-medium" [class]="selectedHeroTab() === 'talents' ? 'border-amber-400 text-amber-300' : 'border-transparent text-zinc-500 hover:text-zinc-300'">Talents</button>
-            <button type="button" role="tab" (click)="selectedHeroTab.set('stats')" [attr.aria-selected]="selectedHeroTab() === 'stats'" class="border-b-2 px-4 py-2 text-sm font-medium" [class]="selectedHeroTab() === 'stats' ? 'border-amber-400 text-amber-300' : 'border-transparent text-zinc-500 hover:text-zinc-300'">Stats</button>
+            <button type="button" role="tab" (click)="selectHeroTab('talents')" [attr.aria-selected]="selectedHeroTab() === 'talents'" class="border-b-2 px-4 py-2 text-sm font-medium" [class]="selectedHeroTab() === 'talents' ? 'border-amber-400 text-amber-300' : 'border-transparent text-zinc-500 hover:text-zinc-300'">Talents</button>
+            <button type="button" role="tab" (click)="selectHeroTab('stats')" [attr.aria-selected]="selectedHeroTab() === 'stats'" class="border-b-2 px-4 py-2 text-sm font-medium" [class]="selectedHeroTab() === 'stats' ? 'border-amber-400 text-amber-300' : 'border-transparent text-zinc-500 hover:text-zinc-300'">Stats</button>
           </nav>
 
           <div class="min-h-0 flex-1 overflow-y-auto pr-1">
@@ -182,7 +182,7 @@ type TelemetryState = {
             </section>
             <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div class="flex min-w-0 flex-1 flex-wrap items-center gap-x-4 gap-y-2">
-                <ng-container *ngFor="let group of combatEffectGroups($any(hero))">
+                <ng-container *ngFor="let group of combatEffectGroups(); trackBy: trackEffectGroup">
                   <div *ngIf="group.effects.length" class="flex items-center gap-1.5">
                     <span class="mr-1 text-[10px] font-semibold uppercase tracking-wider" [class]="effectGroupLabelClass(group.classification)">{{ group.label }}</span>
                     <button *ngFor="let effect of group.effects; trackBy: trackEffect" type="button" [attr.data-effect-key]="effectKey($any(effect))" (pointerenter)="showEffectTooltip($event, $any(effect))" (pointerleave)="hideTooltips()" class="relative h-9 w-9 rounded-lg border bg-zinc-950 p-1" [class]="effectBorderClass($any(effect))" [attr.aria-label]="effectTitle($any(effect))">
@@ -191,7 +191,7 @@ type TelemetryState = {
                     </button>
                   </div>
                 </ng-container>
-                <span *ngIf="!displayedCombatEffects($any(hero)).length" class="text-xs text-zinc-600">No active effects captured</span>
+                <span *ngIf="!hasCombatEffects()" class="text-xs text-zinc-600">No active effects captured</span>
               </div>
               <div class="flex shrink-0 items-center gap-2">
                 <button type="button" (click)="moveTimelineSelection(-1)" [disabled]="!hasPreviousTimelineEntry()" aria-label="Previous timeline snapshot" title="Previous snapshot" class="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40">←</button>
@@ -270,6 +270,21 @@ class AppComponent implements OnInit, OnDestroy {
   readonly recording = signal(false);
   readonly timelineEntries = signal<CombatTimelineEntry[]>([]);
   readonly selectedTimelineId = signal<number | null>(null);
+  readonly combatEffectGroups = computed<Array<{ label: string; classification: string; effects: any[] }>>(() => {
+    const selected = this.selectedTimelineEntry();
+    const hero = this.selectedHero();
+    const source = selected ? selected.effects : (Array.isArray(hero?.combatEffects) ? hero.combatEffects : []);
+    const effects = source.map((effect: any, index: number) => ({
+      ...effect,
+      _uiKey: `${effect?.definitionId ?? effect?.id ?? 'unknown'}:${effect?.runtimeId ?? 'unknown'}:${effect?.sourceHeroId ?? effect?.sourceName ?? 'unknown'}:${effect?.sourceSkillId ?? effect?.originName ?? 'unknown'}:${effect?.level ?? 'unknown'}:${index}`
+    }));
+    return [
+      { label: 'Buffs', classification: 'buff', effects: effects.filter((effect: any) => effect?.classification === 'buff') },
+      { label: 'Debuffs', classification: 'debuff', effects: effects.filter((effect: any) => effect?.classification === 'debuff') },
+      { label: 'Other', classification: 'other', effects: effects.filter((effect: any) => effect?.classification !== 'buff' && effect?.classification !== 'debuff') }
+    ];
+  });
+  readonly hasCombatEffects = computed(() => this.combatEffectGroups().some(group => group.effects.length > 0));
   readonly state = signal<TelemetryState>({ connected: false, gameRunning: false, updatedAt: null, heroes: [], slots: [], resources: [], sanctum: null, inventory: [], battles: [], events: [], catalogs: {} });
   readonly status = signal('Connecting');
   private stream?: EventSource;
@@ -281,9 +296,17 @@ class AppComponent implements OnInit, OnDestroy {
   private recordingBattleMarker: string | null = null;
   private pendingSnapshot?: { previousTimestamp: string | null; resolve: (state: TelemetryState | null) => void; timeout: number };
   private tooltipFrame?: number;
+  private tooltipValidationFrame?: number;
   private activeTooltipId?: string;
+  private activeTooltipAnchor?: HTMLElement;
   private readonly nativePointerMove = (event: PointerEvent) => {
-    if (this.activeTooltipId) this.positionTooltip(event, this.activeTooltipId);
+    if (!this.activeTooltipId || !this.activeTooltipAnchor) return;
+    const target = event.target;
+    if (!this.activeTooltipAnchor.isConnected || !(target instanceof Node) || !this.activeTooltipAnchor.contains(target)) {
+      this.zone.run(() => this.hideTooltips());
+      return;
+    }
+    this.positionTooltip(event, this.activeTooltipId);
   };
 
   constructor(private readonly zone: NgZone) {}
@@ -301,8 +324,10 @@ class AppComponent implements OnInit, OnDestroy {
     this.stream.onopen = () => this.status.set('Backend connected');
     this.stream.onerror = () => this.status.set('Reconnecting');
     this.stream.onmessage = event => {
+      const previousSnapshotTimestamp = this.latestSlotSnapshotTimestamp(this.state());
       const next = { ...JSON.parse(event.data), catalogs: this.state().catalogs } as TelemetryState;
       this.state.set(next);
+      this.scheduleTooltipAnchorValidation();
       if (this.pendingSnapshot && this.latestSlotSnapshotTimestamp(next) !== this.pendingSnapshot.previousTimestamp) {
         window.clearTimeout(this.pendingSnapshot.timeout);
         const resolve = this.pendingSnapshot.resolve;
@@ -316,8 +341,9 @@ class AppComponent implements OnInit, OnDestroy {
       const selected = this.selectedHero();
       if (!selected) return;
       const fresh = next.slots.flatMap(slot => slot.heroes as any[]).find(hero => this.heroIdentity(hero) === this.heroIdentity(selected));
-      if (fresh) {
+      if (fresh && this.latestSlotSnapshotTimestamp(next) !== previousSnapshotTimestamp) {
         this.selectedHero.set(fresh);
+        this.scheduleTooltipAnchorValidation();
         if (this.recording() && this.isHeroDead(fresh)) this.stopRecording();
       }
     };
@@ -328,6 +354,7 @@ class AppComponent implements OnInit, OnDestroy {
     if (this.pendingSnapshot) { window.clearTimeout(this.pendingSnapshot.timeout); this.pendingSnapshot.resolve(null); this.pendingSnapshot = undefined; }
     document.removeEventListener('pointermove', this.nativePointerMove);
     if (this.tooltipFrame) cancelAnimationFrame(this.tooltipFrame);
+    if (this.tooltipValidationFrame) cancelAnimationFrame(this.tooltipValidationFrame);
   }
   slotBattles(slot: number): TelemetryEvent[] { return this.state().battles.filter(battle => Number((battle as any).payload?.battleIndex) === slot); }
   trackBattle(index: number, battle: TelemetryEvent): string {
@@ -440,24 +467,8 @@ class AppComponent implements OnInit, OnDestroy {
   }
   clearTimeline() { this.hideTooltips(); this.timelineEntries.set([]); this.selectedTimelineId.set(null); }
   trackEffect(index: number, effect: any): string { return String(effect?._uiKey ?? `${effect?.id ?? 'unknown'}:${effect?.sourceHeroId ?? effect?.sourceName ?? 'unknown'}:${index}`); }
+  trackEffectGroup(_index: number, group: { classification: string }): string { return group.classification; }
   effectKey(effect: any): string { return String(effect?._uiKey ?? `${effect?.id ?? 'unknown'}:${effect?.sourceHeroId ?? effect?.sourceName ?? 'unknown'}`); }
-  displayedCombatEffects(hero: any): any[] {
-    const selected = this.selectedTimelineEntry();
-    return selected ? selected.effects : (Array.isArray(hero?.combatEffects) ? hero.combatEffects : []);
-  }
-  combatEffectGroups(hero: any): Array<{ label: string; classification: string; effects: any[] }> {
-    const effects = this.displayedCombatEffects(hero).map((rawEffect, index) => {
-      const effect = rawEffect;
-      return {
-      ...effect,
-      _uiKey: `${effect?.id ?? 'unknown'}:${effect?.sourceHeroId ?? effect?.sourceName ?? 'unknown'}:${index}`
-    }; });
-    return [
-      { label: 'Buffs', classification: 'buff', effects: effects.filter(effect => effect?.classification === 'buff') },
-      { label: 'Debuffs', classification: 'debuff', effects: effects.filter(effect => effect?.classification === 'debuff') },
-      { label: 'Other', classification: 'other', effects: effects.filter(effect => effect?.classification !== 'buff' && effect?.classification !== 'debuff') }
-    ];
-  }
   effectTitle(effect: any): string {
     const description = String(effect?.englishDescription || effect?.description || '');
     const stackName = /^1\s+stack(?:\s+of)?\s+(.+)$/i.exec(description.trim())?.[1]?.trim();
@@ -622,6 +633,7 @@ class AppComponent implements OnInit, OnDestroy {
         stats: hero.combatStats.map((stat: any) => ({ ...stat })),
         effects: (Array.isArray(hero.combatEffects) ? hero.combatEffects : []).map((effect: any) => ({ ...effect }))
       };
+      this.hideTooltips();
       this.timelineEntries.update(entries => [...entries, entry]);
       this.selectedTimelineId.set(entry.id);
     } finally {
@@ -637,6 +649,7 @@ class AppComponent implements OnInit, OnDestroy {
   }
   battleResultClass(result: unknown) { return String(result).toLowerCase().includes('win') ? 'bg-emerald-950 text-emerald-300' : 'bg-rose-950 text-rose-300'; }
   openHero(hero: any) { this.stopRecording(); this.clearTimeline(); this.selectedHero.set(hero); this.selectedHeroTab.set('talents'); }
+  selectHeroTab(tab: 'talents' | 'stats') { this.hideTooltips(); this.selectedHeroTab.set(tab); }
   closeHero() { this.stopRecording(); this.selectedHero.set(null); this.hideTooltips(); }
   async resetSlot(slot: number) {
     const response = await fetch('/api/battles/' + slot, { method: 'DELETE' });
@@ -644,22 +657,38 @@ class AppComponent implements OnInit, OnDestroy {
   }
   showEffectTooltip(event: PointerEvent, effect: any) {
     this.hoveredTalent.set(null); this.hoveredStat.set(null); this.hoveredEffect.set(effect);
-    this.activeTooltipId = 'effect-tooltip'; this.positionTooltip(event, this.activeTooltipId);
+    this.activateTooltip(event, 'effect-tooltip');
   }
   showStatTooltip(event: PointerEvent, stat: any) {
     this.hoveredTalent.set(null); this.hoveredEffect.set(null); this.hoveredStat.set(stat);
-    this.activeTooltipId = 'stat-tooltip'; this.positionTooltip(event, this.activeTooltipId);
+    this.activateTooltip(event, 'stat-tooltip');
   }
   showTalentTooltip(event: PointerEvent, talent: any) {
     this.hoveredStat.set(null); this.hoveredEffect.set(null); this.hoveredTalent.set(talent);
-    this.activeTooltipId = 'talent-tooltip'; this.positionTooltip(event, this.activeTooltipId);
+    this.activateTooltip(event, 'talent-tooltip');
   }
   @HostListener('document:mouseleave')
   @HostListener('window:blur')
   hideTooltips() {
     if (this.tooltipFrame) cancelAnimationFrame(this.tooltipFrame);
-    this.tooltipFrame = undefined; this.activeTooltipId = undefined;
+    if (this.tooltipValidationFrame) cancelAnimationFrame(this.tooltipValidationFrame);
+    this.tooltipFrame = undefined; this.tooltipValidationFrame = undefined;
+    this.activeTooltipId = undefined; this.activeTooltipAnchor = undefined;
     this.hoveredTalent.set(null); this.hoveredStat.set(null); this.hoveredEffect.set(null);
+  }
+  private activateTooltip(event: PointerEvent, elementId: string) {
+    this.activeTooltipAnchor = event.currentTarget instanceof HTMLElement ? event.currentTarget : undefined;
+    this.activeTooltipId = elementId;
+    this.positionTooltip(event, elementId);
+  }
+  private scheduleTooltipAnchorValidation() {
+    if (!this.activeTooltipAnchor) return;
+    if (this.tooltipValidationFrame) cancelAnimationFrame(this.tooltipValidationFrame);
+    this.tooltipValidationFrame = requestAnimationFrame(() => {
+      this.tooltipValidationFrame = undefined;
+      const anchor = this.activeTooltipAnchor;
+      if (anchor && (!anchor.isConnected || !anchor.matches(':hover'))) this.zone.run(() => this.hideTooltips());
+    });
   }
   private positionTooltip(event: PointerEvent, elementId: string) {
     const pointerX = event.clientX, pointerY = event.clientY;

@@ -396,9 +396,6 @@ public sealed class Plugin : BasePlugin
 
     private static Dictionary<string, object?>? FindExactAbilityOrigin(object targetCombat, object ability)
     {
-        lock (StateLock)
-            if (EffectOrigins.TryGetValue(NativePointer(ability), out var capturedOrigin))
-                return new Dictionary<string, object?>(capturedOrigin);
         foreach (var aura in ReadList(Read(targetCombat, "auraEffectList")))
         {
             if (!ReadList(Read(aura, "abilityList")).Any(item => NativePointer(item) == NativePointer(ability))) continue;
@@ -414,6 +411,9 @@ public sealed class Plugin : BasePlugin
                 return origin;
             }
         }
+        lock (StateLock)
+            if (EffectOrigins.TryGetValue(NativePointer(ability), out var capturedOrigin))
+                return new Dictionary<string, object?>(capturedOrigin);
         return null;
     }
 
@@ -422,7 +422,16 @@ public sealed class Plugin : BasePlugin
         var skillTable = Read(skill, "tSkillData");
         var info = Read(skill, "tSkillInfoData");
         var talentTable = Read(Read(skill, "ownTalentData"), "tTalentData");
-        var skillId = knownSkillId ?? ReadNullableInt(skillTable, "id");
+        var skillId = ReadNullableInt(skillTable, "id") ?? knownSkillId;
+        var skillName = ReadString(skillTable, "name");
+        var skillEnglishName = EnglishName(skillTable, skillName);
+        var talentSkillId = ReadNullableInt(talentTable, "skillId");
+        var talentName = ReadString(talentTable, "name");
+        var talentEnglishName = EnglishName(talentTable, talentName);
+        var talentMatchesSkill = talentTable is not null
+            && (talentSkillId == skillId || (!string.IsNullOrWhiteSpace(skillEnglishName)
+                && string.Equals(talentEnglishName, skillEnglishName, StringComparison.Ordinal)));
+        if (!talentMatchesSkill) talentTable = null;
         if (talentTable is null && skillId is > 0)
         {
             var hero = Read(knownSourceCombat ?? Read(skill, "ownCombatData"), "heroData");
@@ -430,16 +439,14 @@ public sealed class Plugin : BasePlugin
                 .Select(talent => Read(talent, "tTalentData"))
                 .FirstOrDefault(table => ReadNullableInt(table, "skillId") == skillId);
         }
-        var titleRow = talentTable ?? skillTable;
-        var name = ReadString(titleRow, "name");
         var description = ReadString(info, "des");
         var icon = ReadString(talentTable, "icon");
         QueueIcon(icon);
         return new Dictionary<string, object?>
         {
             ["skillId"] = skillId,
-            ["name"] = name,
-            ["englishName"] = EnglishName(titleRow, name),
+            ["name"] = skillName,
+            ["englishName"] = skillEnglishName,
             ["description"] = description,
             ["englishDescription"] = ReadString(info, "des_en") ?? EnglishText(info, "_des", description),
             ["iconKey"] = icon
