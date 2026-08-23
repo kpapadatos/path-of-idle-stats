@@ -28,7 +28,6 @@ public sealed class Plugin : BasePlugin
     private static Plugin? Instance;
     private static readonly object StateLock = new();
     private static readonly Dictionary<int, BattleCapture> Battles = new();
-    private static readonly Dictionary<nint, int> CombatToBattle = new();
     private static readonly Queue<string> PendingIcons = new();
     private static readonly HashSet<string> KnownIcons = new(StringComparer.OrdinalIgnoreCase);
     private static bool catalogSent;
@@ -44,8 +43,7 @@ public sealed class Plugin : BasePlugin
         harmony = new Harmony(PluginGuid);
         Patch("AdvBattleData", "Create", nameof(BattleCreatedPostfix));
         Patch("CombatData", "CreateEnemy", nameof(EnemyCreatedPostfix));
-        Patch("DropSys", "GetDropItemList", nameof(DropListPostfix));
-        Patch("AdvBattleData", "BattleEnd", nameof(BattleEndedPostfix));
+        Patch("AdvFieldData", "BattleEnd", nameof(BattleEndedPostfix));
         Patch("TableData", "init", nameof(TableReadyPostfix));
         Patch("Root", "Update", nameof(RootUpdatePostfix));
         writer.Enqueue("heartbeat", new { pluginVersion = PluginVersion, mode = "live" });
@@ -72,9 +70,13 @@ public sealed class Plugin : BasePlugin
         {
             var saveField = Read(field, "saveAdvFieldData");
             var index = ReadNullableInt(saveField, "index") ?? fallbackIndex;
+            var combats = ReadList(Read(Read(field, "advBattleData"), "comPlayerList")).ToList();
             var heroes = ReadList(Read(field, "heroFieldList"))
                 .Select(heroField => Read(heroField, "heroData"))
-                .Where(hero => hero is not null).Select(hero => DescribeHero(hero!)).ToList();
+                .Where(hero => hero is not null)
+                .Select(hero => DescribeHero(hero!, combats.FirstOrDefault(combat =>
+                    NativePointer(Read(combat, "heroData") ?? combat) == NativePointer(hero!))))
+                .ToList();
             return new { battleIndex = index, heroes };
         }).ToList();
         var allHeroes = slots.SelectMany(slot => slot.heroes).ToList();
@@ -121,32 +123,21 @@ public sealed class Plugin : BasePlugin
         {
             if (!Battles.TryGetValue(index, out var capture)) Battles[index] = capture = new BattleCapture(index, DateTimeOffset.UtcNow);
             capture.Enemies.Add(DescribeEnemy(__result));
-            CombatToBattle[NativePointer(__result)] = index;
-        }
-    });
-
-    private static void DropListPostfix(object[] __args, object? __result) => SafeHook("drop-list", () =>
-    {
-        if (__result is null || __args.Length < 2) return;
-        var combat = Read(__args[1], "combatData");
-        if (combat is null) return;
-        lock (StateLock)
-        {
-            if (!CombatToBattle.TryGetValue(NativePointer(combat), out var index) || !Battles.TryGetValue(index, out var capture)) return;
-            capture.Loot.AddRange(ReadList(__result).Select(DescribeItem));
         }
     });
 
     private static void BattleEndedPostfix(object __instance, object[] __args) => SafeHook("battle-ended", () =>
     {
-        var index = ReadInt(__instance, "fieldIndex");
+        var index = ReadNullableInt(Read(__instance, "saveAdvFieldData"), "index") ?? -1;
+        if (index < 0) return;
         BattleCapture capture;
         lock (StateLock)
         {
             if (!Battles.TryGetValue(index, out capture!)) capture = new BattleCapture(index, DateTimeOffset.UtcNow);
             Battles[index] = new BattleCapture(index, DateTimeOffset.UtcNow);
         }
-        var battleMap = Read(__instance, "battleMapData");
+        var battle = Read(__instance, "advBattleData");
+        var battleMap = Read(battle, "battleMapData");
         var mapSite = Read(battleMap, "mapSiteData");
         var chapSite = Read(mapSite, "chapSiteData");
         var siteRow = Read(chapSite, "tChapterSiteData");
@@ -157,27 +148,32 @@ public sealed class Plugin : BasePlugin
         var siteIndex = ReadNullableInt(siteRow, "index");
         var englishPlaceTitle = !string.IsNullOrWhiteSpace(englishChapter) && siteIndex is not null
             ? $"{englishChapter}-{siteIndex}" : EnglishName(siteRow, placeTitle);
-        var heroes = ReadList(Read(__instance, "comPlayerList"))
+        var heroes = ReadList(Read(battle, "comPlayerList"))
             .Select(combat => Read(combat, "heroData"))
             .Where(hero => hero is not null)
-            .Select(hero => DescribeHero(hero!)).ToList();
+            .Select(hero =>
+            {
+                var combat = ReadList(Read(battle, "comPlayerList"))
+                    .FirstOrDefault(candidate => NativePointer(Read(candidate, "heroData") ?? candidate) == NativePointer(hero!));
+                return DescribeHero(hero!, combat);
+            }).ToList();
         EmitCatalogOnce();
         ExportPendingIcons(24);
         var endedAt = DateTimeOffset.UtcNow;
         Instance?.writer?.Enqueue("battle.ended", new
         {
             battleIndex = index,
-            result = __args.FirstOrDefault()?.ToString() ?? Read(__instance, "battleEndType")?.ToString(),
+            result = __args.FirstOrDefault()?.ToString() ?? Read(battle, "battleEndType")?.ToString(),
             capture.StartedAt,
             endedAt,
             durationSeconds = Math.Round((endedAt - capture.StartedAt).TotalSeconds, 3),
-            adventureType = Read(__instance, "advType")?.ToString(),
+            adventureType = Read(battle, "advType")?.ToString(),
             placeTitle,
             englishPlaceTitle,
             wave = ReadNullableInt(battleMap, "enemyWave"),
             enemyCount = capture.Enemies.Count,
             enemies = capture.Enemies,
-            loot = capture.Loot,
+            loot = AggregateLoot(ReadList(Read(__instance, "dropItemList")).Select(DescribeItem)),
             heroes
         });
         Instance?.writer?.Enqueue("snapshot.heroes", new { heroes });
@@ -195,7 +191,7 @@ public sealed class Plugin : BasePlugin
         };
     }
 
-    private static Dictionary<string, object?> DescribeHero(object hero)
+    private static Dictionary<string, object?> DescribeHero(object hero, object? combat = null)
     {
         var save = Read(hero, "saveHeroData");
         var jobId = ReadNullableInt(save, "jobId");
@@ -215,7 +211,11 @@ public sealed class Plugin : BasePlugin
             ["level"] = ReadNullableInt(save, "level"),
             ["experience"] = ReadNullableInt(save, "exp"), ["quality"] = ReadNullableInt(save, "quality"),
             ["blessLevel"] = ReadNullableInt(save, "blessLevel"), ["sanity"] = ReadNullableInt(save, "sanityPoint"),
-            ["attributes"] = DescribeAttributes(Read(hero, "attrData")), ["equippedItems"] = equipped
+            ["attributes"] = DescribeAttributes(Read(hero, "attrData")),
+            ["stats"] = DescribeStats(Read(hero, "attrData"), hero, ReadNullableInt(save, "level")),
+            ["combatStats"] = DescribeStats(Read(combat, "attrData"), hero, ReadNullableInt(save, "level")),
+            ["inCombat"] = combat is not null,
+            ["equippedItems"] = equipped
             , ["talents"] = ReadValues(Read(Read(hero, "heroTalentData"), "talentDic")).Select(DescribeHeroTalent).ToList()
         };
     }
@@ -274,6 +274,31 @@ public sealed class Plugin : BasePlugin
         };
     }
 
+    private static List<Dictionary<string, object?>> AggregateLoot(IEnumerable<Dictionary<string, object?>> items)
+    {
+        var result = new List<Dictionary<string, object?>>();
+        var stackIndexes = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var item in items)
+        {
+            var type = item.GetValueOrDefault("type")?.ToString() ?? "unknown";
+            var id = item.GetValueOrDefault("id")?.ToString() ?? "unknown";
+            var stackable = !type.Equals("equip", StringComparison.OrdinalIgnoreCase);
+            var key = type + ":" + id;
+            if (stackable && stackIndexes.TryGetValue(key, out var existingIndex))
+            {
+                var existing = result[existingIndex];
+                var total = Convert.ToInt32(existing.GetValueOrDefault("count") ?? 0, CultureInfo.InvariantCulture)
+                    + Convert.ToInt32(item.GetValueOrDefault("count") ?? 0, CultureInfo.InvariantCulture);
+                existing["count"] = total;
+                continue;
+            }
+            var copy = new Dictionary<string, object?>(item);
+            if (stackable) stackIndexes[key] = result.Count;
+            result.Add(copy);
+        }
+        return result;
+    }
+
     private static Dictionary<string, object?> DescribeAttributes(object? attrData)
     {
         var output = new Dictionary<string, object?>();
@@ -288,6 +313,55 @@ public sealed class Plugin : BasePlugin
         }
         catch { }
         return output;
+    }
+
+    private static List<Dictionary<string, object?>> DescribeStats(object? attrData, object hero, int? level)
+    {
+        var output = new List<Dictionary<string, object?>>();
+        if (attrData is null) return output;
+        var enumType = GameType("EAttrType");
+        var getter = attrData.GetType().GetMethod("GetAttrValue", BindingFlags.Instance | BindingFlags.Public);
+        if (enumType is null || getter is null) return output;
+        foreach (var enumValue in Enum.GetValues(enumType)) try
+        {
+            var id = Convert.ToInt32(enumValue, CultureInfo.InvariantCulture);
+            var value = Convert.ToSingle(getter.Invoke(attrData, new[] { enumValue }), CultureInfo.InvariantCulture);
+            if (Math.Abs(value) <= 0.00001f) continue;
+            var row = InvokeStatic("TableData", "getTAttrData", id);
+            var rawName = ReadString(row, "name") ?? enumValue.ToString() ?? $"Stat {id}";
+            var englishName = EnglishName(row, HumanizeIdentifier(enumValue.ToString() ?? $"Stat {id}"));
+            var rawDescription = ReadString(row, "des");
+            var englishDescription = EnglishText(row, "_des", rawDescription);
+            var info = InvokeStaticArgs("AttrInfoData", "Create", id, value, attrData, level ?? 1, true, true, true);
+            if (info is not null) info.GetType().GetMethod("SetOwnHeroData")?.Invoke(info, new[] { hero });
+            var displayValue = info is null ? null : InvokeString(info, "GetDesc");
+            var special = info is null ? null : InvokeString(info, "GetSpecialDesc");
+            var explanation = info is null ? null : InvokeString(info, "GetExplain");
+            output.Add(new()
+            {
+                ["id"] = id, ["key"] = enumValue.ToString(), ["name"] = rawName, ["englishName"] = englishName,
+                ["value"] = value, ["displayValue"] = displayValue,
+                ["description"] = rawDescription, ["englishDescription"] = englishDescription,
+                ["specialDescription"] = special, ["explanation"] = explanation,
+                ["showType"] = ReadNullableInt(row, "showType"), ["valueType"] = ReadNullableInt(row, "valueType"),
+                ["type"] = ReadNullableInt(row, "type"), ["typeParam"] = ReadNullableInt(row, "typeParam")
+            });
+        }
+        catch { }
+        return output.OrderBy(stat => Convert.ToInt32(stat["id"], CultureInfo.InvariantCulture)).ToList();
+    }
+
+    private static string HumanizeIdentifier(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return value;
+        var builder = new StringBuilder(value.Length + 8);
+        for (var index = 0; index < value.Length; index++)
+        {
+            var character = value[index];
+            if (index > 0 && char.IsUpper(character) && !char.IsUpper(value[index - 1])) builder.Append(' ');
+            builder.Append(index == 0 ? char.ToUpperInvariant(character) : character);
+        }
+        return builder.ToString();
     }
 
     private static Dictionary<string, object?> DescribeSimpleObject(object value)
@@ -436,6 +510,17 @@ public sealed class Plugin : BasePlugin
     private static object? InvokeStatic(string typeName, string method, object argument)
     {
         try { return GameType(typeName)?.GetMethod(method, BindingFlags.Public | BindingFlags.Static)?.Invoke(null, new[] { argument }); }
+        catch { return null; }
+    }
+
+    private static object? InvokeStaticArgs(string typeName, string method, params object[] arguments)
+    {
+        try
+        {
+            var candidate = GameType(typeName)?.GetMethods(BindingFlags.Public | BindingFlags.Static)
+                .FirstOrDefault(value => value.Name == method && value.GetParameters().Length == arguments.Length);
+            return candidate?.Invoke(null, arguments);
+        }
         catch { return null; }
     }
 

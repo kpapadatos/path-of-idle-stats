@@ -154,8 +154,8 @@ Harmony postfixes are installed on:
 
 - `AdvBattleData.Create` — battle start and slot identity.
 - `CombatData.CreateEnemy` — enemy counting.
-- `DropSys.GetDropItemList` — loot capture.
-- `AdvBattleData.BattleEnd` — completed battle event.
+- `AdvFieldData.BattleEnd` — the single completed-battle emission point after the adventure field finalizes rewards and global modifiers.
+- Do not capture loot from `DropSys.GetDropItemList` or `AdvFieldData.AddDropItem`; both occur before the late Gold/Blood reward adjustment.
 - `TableData.init` — one-time catalogs.
 - `Root.Update` — checks for an on-demand snapshot marker four times per second.
 
@@ -206,6 +206,8 @@ The dashboard intentionally contains only the header/status controls, three batt
 - History expands, but individual battles start collapsed.
 - **Reset history** appears inside expanded history and clears only that slot.
 - Show exact English place, outcome, duration, timestamp, enemy count, wave, mode, and loot.
+- Aggregate stackable finalized loot by item type/ID and sum counts; keep equipment entries separate because their affixes and other rolled properties may differ.
+- Gold and Blood receive a late global Sanctum multiplier that is not represented by `AdvBattleData.teamGoldDropUp` (observed as zero). Read the finalized `AdvFieldData.dropItemList` in the `AdvFieldData.BattleEnd` postfix and emit exactly one authoritative `battle.ended` event. Never emit a provisional battle followed by a correction event.
 - Header format: `Battle history (15) - Rift-Star Expanse-15 Avg. Time: 31.211s`.
 - Average only the newest 10 entries in that slot whose resolved title exactly equals `Rift-Star Expanse-15`.
 - Format to three decimals plus `s`; show `n/a` when no exact matches exist.
@@ -222,8 +224,19 @@ The dashboard intentionally contains only the header/status controls, three batt
 - Mutated skills are unpositioned, non-inspired skills that are not basic.
 - Tooltips show English name, rank, optional description, skill ID, and tags.
 - Talents legitimately have no description; never show “No description available.”
-- Tooltip behavior is document-level: `pointermove`, `elementFromPoint`, nearest `[data-talent-id]`, fixed positioning, viewport-edge flipping, `pointer-events: none`, and immediate clearing off-tile, on document leave, window blur, modal close, or SSE refresh.
+- The Angular root component uses `ChangeDetectionStrategy.OnPush`; live SSE updates flow through signals, and battle rows use stable tracking keys to avoid unnecessary DOM replacement.
+- Tooltip behavior is document-level: `pointermove`, `elementFromPoint`, nearest `[data-talent-id]`, fixed positioning, viewport-edge flipping, `pointer-events: none`, and immediate clearing off-tile, on document leave, window blur, or modal close. Ordinary SSE/battle updates must not clear an active tooltip.
 - Keep tooltip DOM outside overflow-clipped grid regions.
+
+### Hero stats tab
+
+- The hero dialog is a tab group with **Talents** first and **Stats** second.
+- Stats contains two side-by-side lists: `HeroData.attrData` for current/base values and the matching `CombatData.attrData` for live combat values.
+- The **Refresh stats now** button uses the same on-demand snapshot marker and updates the open hero without waiting for battle completion.
+- Match each hero to combat state through `AdvFieldData.advBattleData.comPlayerList` and the combat object's `heroData` pointer.
+- Enumerate every nonzero `EAttrType`, including normally hidden/internal modifiers. Use `TAttr` for English names/descriptions and retain the enum key plus numeric ID for transparency.
+- Use `AttrInfoData.Create`, `SetOwnHeroData`, `GetDesc`, `GetSpecialDesc`, and `GetExplain` for the game's resolved derived explanations. Pass the hero's level for both base and combat attributes.
+- Crit explanations are verified to resolve values such as `Crit Value: 9629` into 54% crit chance and 154% additional damage.
 
 ## English localization
 
