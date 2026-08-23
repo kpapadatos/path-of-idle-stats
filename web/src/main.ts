@@ -6,6 +6,7 @@ import { bootstrapApplication } from '@angular/platform-browser';
 type TelemetryEvent = { type: string; timestamp?: string; payload?: unknown } & Record<string, unknown>;
 type TelemetryState = {
   connected: boolean;
+  gameRunning: boolean;
   updatedAt: string | null;
   heroes: unknown[];
   slots: Array<{ battleIndex: number; heroes: unknown[] }>;
@@ -25,10 +26,13 @@ type TelemetryState = {
     <main class="mx-auto max-w-7xl p-3 md:p-5">
       <header class="mb-4 flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 class="text-3xl font-semibold tracking-tight">Path of Idle Copilot</h1>
+          <h1 class="text-3xl font-semibold tracking-tight">Path of Idle Stats</h1>
         </div>
         <div class="flex items-center gap-2">
           <button type="button" (click)="refreshHeroes()" [disabled]="refreshing()" class="rounded-full border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-300 hover:border-amber-700 disabled:opacity-50">{{ refreshing() ? 'Requested…' : 'Refresh heroes' }}</button>
+          <div class="rounded-full border px-3 py-1.5 text-sm" [class]="gameStatusClass()">
+            <span class="mr-2 inline-block h-2 w-2 rounded-full" [class]="gameDotClass()"></span>{{ state().gameRunning ? 'Game running' : 'Game stopped' }}
+          </div>
           <div class="rounded-full border px-3 py-1.5 text-sm" [class]="statusClass()">
             <span class="mr-2 inline-block h-2 w-2 rounded-full" [class]="dotClass()"></span>{{ status() }}
           </div>
@@ -215,7 +219,7 @@ class AppComponent implements OnInit, OnDestroy {
   readonly hoveredTalent = signal<any | null>(null);
   readonly hoveredStat = signal<any | null>(null);
   readonly refreshing = signal(false);
-  readonly state = signal<TelemetryState>({ connected: false, updatedAt: null, heroes: [], slots: [], resources: [], inventory: [], battles: [], events: [], catalogs: {} });
+  readonly state = signal<TelemetryState>({ connected: false, gameRunning: false, updatedAt: null, heroes: [], slots: [], resources: [], inventory: [], battles: [], events: [], catalogs: {} });
   readonly status = signal('Connecting');
   private stream?: EventSource;
   private tooltipFrame?: number;
@@ -446,6 +450,8 @@ class AppComponent implements OnInit, OnDestroy {
   placeTitleFallback(payload: any) { return payload?.adventureType ? String(payload.adventureType) : 'Unknown place'; }
   statusClass() { return this.status() === 'Backend connected' ? 'border-emerald-800 bg-emerald-950 text-emerald-300' : 'border-amber-800 bg-amber-950 text-amber-300'; }
   dotClass() { return this.status() === 'Backend connected' ? 'bg-emerald-400' : 'bg-amber-400'; }
+  gameStatusClass() { return this.state().gameRunning ? 'border-emerald-800 bg-emerald-950 text-emerald-300' : 'border-zinc-700 bg-zinc-900 text-zinc-500'; }
+  gameDotClass() { return this.state().gameRunning ? 'bg-emerald-400' : 'bg-zinc-600'; }
 }
 
 bootstrapApplication(AppComponent).catch(console.error);

@@ -10,13 +10,18 @@ const webRoot = join(root, 'dist', 'dashboard', 'browser');
 const iconRoot = join(root, 'data', 'icons');
 const snapshotRequest = 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\PathOfIdle\\BepInEx\\PathOfIdleStats\\snapshot.request';
 const clients = new Set();
-const state = { connected: false, updatedAt: null, heroes: [], slots: [], resources: [], inventory: [], battles: [], events: [], catalogs: {} };
+const state = { connected: false, gameRunning: false, updatedAt: null, heroes: [], slots: [], resources: [], inventory: [], battles: [], events: [], catalogs: {} };
+let lastGameHeartbeat = 0;
 await mkdir(dataDirectory, { recursive: true });
 
 function applyEvent(event) {
   state.connected = true;
   state.updatedAt = event.timestamp;
-  if (!event.type.startsWith('catalog.')) {
+  if (event.type === 'heartbeat') {
+    lastGameHeartbeat = Date.now();
+    state.gameRunning = true;
+  }
+  if (!event.type.startsWith('catalog.') && event.type !== 'heartbeat') {
     state.events.unshift(event);
     state.events = state.events.slice(0, 100);
   }
@@ -102,7 +107,7 @@ const server = createServer(async (request, response) => {
         const catalogDirectory = join(dataDirectory, 'catalogs');
         await mkdir(catalogDirectory, { recursive: true });
         await import('node:fs/promises').then(({ writeFile }) => writeFile(join(catalogDirectory, event.type.slice(8) + '.json'), JSON.stringify(event.payload), 'utf8'));
-      } else {
+      } else if (event.type !== 'heartbeat') {
         await appendFile(eventLog, JSON.stringify(event) + '\n', 'utf8');
       }
       applyEvent(event);
@@ -140,3 +145,11 @@ server.listen(43127, '127.0.0.1', () => {
   console.log('Path of Idle Stats: http://127.0.0.1:43127');
   console.log(`Event log: ${eventLog}`);
 });
+
+const gameHeartbeatTimer = setInterval(() => {
+  const running = lastGameHeartbeat > 0 && Date.now() - lastGameHeartbeat < 5000;
+  if (state.gameRunning === running) return;
+  state.gameRunning = running;
+  broadcastState();
+}, 1000);
+gameHeartbeatTimer.unref();

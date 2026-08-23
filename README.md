@@ -1,10 +1,10 @@
-# Install and use Path of Idle Copilot
+# Install and use Path of Idle Stats
 
 This guide is for Windows players who are not developers. Follow the steps in order. Commands shown in a box can be copied and pasted into **PowerShell**.
 
 ## What this mod does
 
-Path of Idle Copilot reads live gameplay information and displays it in a local dashboard at `http://127.0.0.1:43127`.
+Path of Idle Stats reads live gameplay information and displays it in a local dashboard at `http://127.0.0.1:43127`.
 
 - It shows battle slots, heroes, talents, stats, battle history, loot speed, and resources.
 - It reads game state only. It does not edit or inspect save files.
@@ -108,13 +108,13 @@ If an extra folder level appears between `bepinex` and `BepInEx`, move the archi
 7. Wait until the main menu appears. A small BepInEx console window may also appear; this is expected.
 8. Close the game normally.
 
-This first launch creates the game-specific support files needed to build the Copilot plugin. Confirm this folder now exists:
+This first launch creates the game-specific support files needed to build the Stats plugin. Confirm this folder now exists:
 
 ```text
 C:\Program Files (x86)\Steam\steamapps\common\PathOfIdle\BepInEx\interop
 ```
 
-## Part 5: Build and install the Copilot plugin
+## Part 5: Build and install the Stats plugin
 
 Keep the game closed. In PowerShell, run:
 
@@ -143,6 +143,8 @@ For normal daily use:
 
 The dashboard should populate after the save loads. Battles update it automatically. Select **Refresh heroes** to request hero, talent, combat-stat, slot, and resource information immediately instead of waiting for a battle to finish.
 
+The **Game running** indicator turns green while the plugin is active. It normally changes to **Game stopped** within five seconds after the game closes. **Backend connected** means the local dashboard server is available.
+
 To stop the dashboard, select its terminal window and press `Ctrl+C`, or close the window. This does not affect the game or save.
 
 ## Updating the mod
@@ -162,7 +164,7 @@ Copy-Item '.\plugin\bin\Release\net6.0\PathOfIdleStats.dll' 'C:\Program Files (x
 4. Restart `start.bat` if it was running.
 5. Start the game again.
 
-BepInEx usually does not need to be reinstalled when only Copilot changes.
+BepInEx usually does not need to be reinstalled when only Stats changes.
 
 ## Troubleshooting
 
@@ -172,7 +174,7 @@ BepInEx usually does not need to be reinstalled when only Copilot changes.
 - Look for `Path of Idle Stats: http://127.0.0.1:43127` in that window.
 - Try [http://127.0.0.1:43127/api/health](http://127.0.0.1:43127/api/health). A small JSON response means the server is working.
 - If `npm` is not recognized, reinstall Node.js LTS and restart Windows.
-- If port `43127` is already in use, close older Copilot terminal windows and start it again.
+- If port `43127` is already in use, close older Stats terminal windows and start it again.
 
 ### The dashboard opens but contains no game data
 
@@ -213,11 +215,11 @@ C:\Program Files (x86)\Steam\steamapps\common\PathOfIdle\BepInEx\plugins\PathOfI
 
 3. Delete `C:\r\path-of-idle-stats` if you also want to remove the dashboard and its locally recorded telemetry.
 
-Leave the rest of `BepInEx` installed if another mod uses it. If Copilot was the only BepInEx mod and you want to remove BepInEx itself, use Steam's **Verify integrity of game files** feature or ask the maintainer for help rather than deleting unfamiliar game-folder files manually.
+Leave the rest of `BepInEx` installed if another mod uses it. If Stats was the only BepInEx mod and you want to remove BepInEx itself, use Steam's **Verify integrity of game files** feature or ask the maintainer for help rather than deleting unfamiliar game-folder files manually.
 
 ## Privacy and saved data
 
-- Copilot never intentionally sends telemetry outside your PC.
+- Stats never intentionally sends telemetry outside your PC.
 - Local battle events may include hero names, equipment, and gameplay history under `C:\r\path-of-idle-stats\data`.
-- Deleting that `data` folder while the server is stopped removes Copilot's recorded telemetry and generated catalogs. It does not delete game progress.
+- Deleting that `data` folder while the server is stopped removes Stats' recorded telemetry and generated catalogs. It does not delete game progress.
 - Game save files are outside this project and are never part of installation or uninstallation.

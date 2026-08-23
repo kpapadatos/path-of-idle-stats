@@ -23,7 +23,7 @@ public sealed class Plugin : BasePlugin
 {
     public const string PluginGuid = "local.pathofidle.stats";
     public const string PluginName = "Path of Idle Stats";
-    public const string PluginVersion = "0.2.0";
+    public const string PluginVersion = "0.3.0";
 
     private static Plugin? Instance;
     private static readonly object StateLock = new();
@@ -32,6 +32,7 @@ public sealed class Plugin : BasePlugin
     private static readonly HashSet<string> KnownIcons = new(StringComparer.OrdinalIgnoreCase);
     private static bool catalogSent;
     private static float nextSnapshotRequestCheck;
+    private static float nextHeartbeat;
     private Harmony? harmony;
     private TelemetryWriter? writer;
     private static Assembly? gameAssembly;
@@ -54,8 +55,14 @@ public sealed class Plugin : BasePlugin
 
     private static void RootUpdatePostfix() => SafeHook("snapshot-request", () =>
     {
-        if (Time.realtimeSinceStartup < nextSnapshotRequestCheck) return;
-        nextSnapshotRequestCheck = Time.realtimeSinceStartup + 0.25f;
+        var now = Time.realtimeSinceStartup;
+        if (now >= nextHeartbeat)
+        {
+            nextHeartbeat = now + 2f;
+            Instance?.writer?.Enqueue("heartbeat", new { pluginVersion = PluginVersion, mode = "live" });
+        }
+        if (now < nextSnapshotRequestCheck) return;
+        nextSnapshotRequestCheck = now + 0.25f;
         var requestPath = Path.Combine(Paths.BepInExRootPath, "PathOfIdleStats", "snapshot.request");
         if (!File.Exists(requestPath)) return;
         File.Delete(requestPath);

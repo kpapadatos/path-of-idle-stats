@@ -171,7 +171,7 @@ Important paths and fields:
 
 ## Telemetry and HTTP API
 
-Current events include `battle.started`, `battle.ended`, `snapshot.slots`, `snapshot.heroes`, `snapshot.inventory`, and catalogs for talents, skills, abilities, materials, runes, tools, curios, and equipment.
+Current events include `heartbeat`, `battle.started`, `battle.ended`, `snapshot.slots`, `snapshot.heroes`, `snapshot.resources`, `snapshot.inventory`, and catalogs for talents, skills, abilities, materials, runes, tools, curios, and equipment. The plugin sends a lightweight heartbeat every two seconds. The backend does not persist heartbeats or add them to the event list; it broadcasts `gameRunning` only when presence changes and marks the game stopped after five seconds without a heartbeat.
 
 - `GET /api/health` — health and last update.
 - `GET /api/state` — live state excluding large catalogs.
