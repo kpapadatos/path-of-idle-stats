@@ -96,12 +96,14 @@ type TelemetryState = {
 
       <section class="mt-3 rounded-2xl border border-zinc-700 bg-zinc-950 p-3">
         <div class="mb-3 flex items-end justify-between gap-3"><div><h2 class="font-semibold text-zinc-100">Loot speed</h2><p class="text-xs text-zinc-500">Combined hourly rate across the retained battle history.</p></div><span class="text-xs text-zinc-600">{{ state().battles.length }} battles</span></div>
-        <div *ngIf="lootRates().length; else noLootRates" class="grid grid-cols-2 gap-1.5">
-          <article *ngFor="let item of lootRates(); trackBy: trackLootRate" class="flex min-w-0 items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900/70 px-2 py-1">
-            <img *ngIf="$any(item).iconUrl" [src]="$any(item).iconUrl" class="h-6 w-6 shrink-0 object-contain" alt="">
-            <p class="min-w-0 flex-1 truncate text-sm text-zinc-300">{{ $any(item).englishName || $any(item).name || 'Unknown item' }}</p>
-            <span class="shrink-0 font-mono text-sm font-semibold text-amber-300">{{ lootRateLabel($any(item).perHour) }}/h</span>
-          </article>
+        <div *ngIf="lootRates().length; else noLootRates" class="grid grid-cols-2 items-start gap-1.5">
+          <div *ngFor="let column of lootRateColumns()" class="grid gap-1.5">
+            <article *ngFor="let item of column; trackBy: trackLootRate" class="flex min-w-0 items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900/70 px-2 py-1">
+              <img *ngIf="$any(item).iconUrl" [src]="$any(item).iconUrl" class="h-6 w-6 shrink-0 object-contain" alt="">
+              <p class="min-w-0 flex-1 truncate text-sm text-zinc-300">{{ $any(item).englishName || $any(item).name || 'Unknown item' }}</p>
+              <span class="shrink-0 font-mono text-sm font-semibold text-amber-300">{{ lootRateLabel($any(item).perHour) }}/h</span>
+            </article>
+          </div>
         </div>
         <ng-template #noLootRates><p class="py-4 text-center text-sm text-zinc-600">Waiting for completed battles with loot.</p></ng-template>
       </section>
@@ -307,6 +309,11 @@ class AppComponent implements OnInit, OnDestroy {
       .sort((left, right) => right.perHour - left.perHour);
   }
   trackLootRate(_index: number, item: any): string { return String(item?.key); }
+  lootRateColumns(): any[][] {
+    const rates = this.lootRates();
+    const split = Math.ceil(rates.length / 2);
+    return [rates.slice(0, split), rates.slice(split)];
+  }
   lootRateLabel(rate: number): string {
     if (!Number.isFinite(rate)) return '—';
     return rate >= 100 ? Math.round(rate).toLocaleString('en-US') : rate.toLocaleString('en-US', { maximumFractionDigits: 1 });

@@ -6,6 +6,11 @@ This guide is for Windows players who are not developers. Follow the steps in or
 
 Path of Idle Stats reads live gameplay information and displays it in a local dashboard at `http://127.0.0.1:43127`.
 
+<p align="center">
+  <img src="docs/images/dashboard-overview.png" width="49%" alt="Path of Idle Stats dashboard with resources, battle slots, battle history averages, and loot speed">
+  <img src="docs/images/hero-stats.png" width="49%" alt="Hero details showing current stats beside live combat stats">
+</p>
+
 - It shows battle slots, heroes, talents, stats, battle history, loot speed, and resources.
 - It reads game state only. It does not edit or inspect save files.
 - Its server listens only on your PC (`127.0.0.1`); it is not exposed to your network.
@@ -18,7 +23,7 @@ You need:
 1. **Path of Idle: Old Gods Rising**, installed through Steam.
 2. **Node.js LTS**, from [nodejs.org](https://nodejs.org/). Use the normal Windows installer and accept its defaults.
 3. **A current .NET SDK**, from [dotnet.microsoft.com/download](https://dotnet.microsoft.com/download). Choose **.NET SDK for Windows x64**, not only the Desktop Runtime.
-4. Access to the private `kpapadatos/path-of-idle-stats` GitHub repository.
+4. The public project repository: [https://github.com/kpapadatos/path-of-idle-stats](https://github.com/kpapadatos/path-of-idle-stats).
 5. The official BepInEx file named `BepInEx-Unity.IL2CPP-win-x64-6.0.0-be.760+a1afbfb.zip`.
 
 The instructions assume Steam installed the game here:
@@ -31,7 +36,7 @@ To check, open Steam, right-click the game, and select **Manage → Browse local
 
 ## Part 1: Download the project
 
-1. In GitHub, open `kpapadatos/path-of-idle-stats`.
+1. Open [https://github.com/kpapadatos/path-of-idle-stats](https://github.com/kpapadatos/path-of-idle-stats).
 2. Select **Code → Download ZIP**.
 3. Open the downloaded ZIP.
 4. Extract its project folder to `C:\r`.

@@ -251,7 +251,7 @@ Catalogs cover talents, skills, abilities, materials, runes, tools, curios, and 
 - `data/events.jsonl` may contain hero names, equipment, and gameplay history; it is ignored.
 - Catalogs and icons are ignored.
 - No telemetry is intentionally sent off-machine.
-- GitHub repository is private: `kpapadatos/path-of-idle-stats`.
+- Public GitHub repository: [https://github.com/kpapadatos/path-of-idle-stats](https://github.com/kpapadatos/path-of-idle-stats).
 
 ## Portability limitations to fix next
 
@@ -285,4 +285,4 @@ git status --short
 
 For plugin changes: close the game, build, update, verify DLL hashes, restart, enter the save, inspect the BepInEx log, request a snapshot, and confirm three slots plus hero/talent selection data.
 
-The private repository is `https://github.com/kpapadatos/path-of-idle-stats`; default branch is `main`. Preserve reproducibility through pinned downloads, scripts, configuration examples, and extraction instructions—not by committing runtime or game-derived files.
+The public repository is [https://github.com/kpapadatos/path-of-idle-stats](https://github.com/kpapadatos/path-of-idle-stats); the default branch is `main`. Preserve reproducibility through pinned downloads, scripts, configuration examples, and extraction instructions—not by committing runtime or game-derived files.
