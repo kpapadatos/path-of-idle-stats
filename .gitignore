@@ -1,0 +1,35 @@
+# Dependencies and package-manager caches
+node_modules/
+.pnpm-store/
+
+# Angular/build output and caches
+dist/
+.angular/
+coverage/
+
+# .NET build output
+bin/
+obj/
+
+# Downloaded, extracted, and temporary tooling
+work/
+*.tmp
+*.temp
+
+# Runtime telemetry and game-derived assets/catalogs
+data/
+
+# Machine-specific installation record
+install-manifest.json
+
+# Logs and local environment overrides
+*.log
+.env
+.env.*
+!.env.example
+
+# Editor and OS metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

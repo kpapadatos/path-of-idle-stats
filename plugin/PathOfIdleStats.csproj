@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>PathOfIdleStats</AssemblyName>
+    <RootNamespace>PathOfIdleStats</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="BepInEx.Core">
+      <HintPath>..\work\bepinex\BepInEx\core\BepInEx.Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="BepInEx.Unity.IL2CPP">
+      <HintPath>..\work\bepinex\BepInEx\core\BepInEx.Unity.IL2CPP.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>
+
