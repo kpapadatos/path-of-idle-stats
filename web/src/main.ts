@@ -11,6 +11,7 @@ type TelemetryState = {
   heroes: unknown[];
   slots: Array<{ battleIndex: number; heroes: unknown[] }>;
   resources: unknown[];
+  sanctum: { floor?: number | null; resourceBonusRate?: number | null } | null;
   inventory: unknown[];
   battles: TelemetryEvent[];
   events: TelemetryEvent[];
@@ -39,10 +40,13 @@ type TelemetryState = {
         </div>
       </header>
 
-      <section class="mb-3 grid grid-cols-3 gap-2" aria-label="Primary resources">
+      <section class="mb-3 grid grid-cols-4 gap-2" aria-label="Primary resources and Sanctum">
         <article *ngFor="let resource of primaryResources(); trackBy: trackResource" [attr.aria-label]="resourceTitle($any(resource)) + ': ' + resourceCount($any(resource))" class="flex items-center justify-center gap-2 rounded-xl border border-zinc-800 bg-zinc-900/80 px-3 py-2">
           <img *ngIf="$any(resource).iconUrl" [src]="$any(resource).iconUrl" class="h-7 w-7 object-contain" alt="">
           <p class="font-mono text-sm font-semibold text-zinc-100">{{ resourceCount($any(resource)) }}</p>
+        </article>
+        <article class="flex items-center justify-center rounded-xl border border-zinc-800 bg-zinc-900/80 px-3 py-2 text-sm font-semibold text-zinc-100">
+          Sanctum Floor {{ sanctumFloor() }} ({{ sanctumBonus() }})
         </article>
       </section>
 
@@ -62,8 +66,9 @@ type TelemetryState = {
           </div>
 
           <details class="group mt-3 rounded-xl border border-zinc-800 bg-zinc-950/70">
-            <summary class="flex cursor-pointer list-none items-center justify-between px-3 py-2.5 text-sm font-medium text-zinc-300">
-              <span>Battle history ({{ slotBattles(slot).length }}) - Rift-Star Expanse-15 Avg. Time: {{ riftStarAverage(slot) }}</span>
+            <summary class="relative flex cursor-pointer list-none items-center justify-between px-3 py-2.5 text-sm font-medium text-zinc-300">
+              <span class="opacity-50">Battle history ({{ slotBattles(slot).length }}) - Rift-Star Expanse-15</span>
+              <span class="pointer-events-none absolute left-1/2 -translate-x-1/2">Avg. Time: {{ riftStarAverage(slot) }}</span>
               <span class="ml-4 flex shrink-0 items-center gap-3">
                 <button type="button" (click)="$event.preventDefault(); $event.stopPropagation(); resetSlot(slot)" [disabled]="!slotBattles(slot).length" class="rounded-lg border border-rose-900 bg-rose-950/50 px-3 py-1.5 text-xs text-rose-300 hover:bg-rose-950 disabled:cursor-not-allowed disabled:opacity-40">Reset history</button>
                 <span class="text-zinc-600 transition-transform group-open:rotate-180">⌄</span>
@@ -221,7 +226,7 @@ class AppComponent implements OnInit, OnDestroy {
   readonly hoveredTalent = signal<any | null>(null);
   readonly hoveredStat = signal<any | null>(null);
   readonly refreshing = signal(false);
-  readonly state = signal<TelemetryState>({ connected: false, gameRunning: false, updatedAt: null, heroes: [], slots: [], resources: [], inventory: [], battles: [], events: [], catalogs: {} });
+  readonly state = signal<TelemetryState>({ connected: false, gameRunning: false, updatedAt: null, heroes: [], slots: [], resources: [], sanctum: null, inventory: [], battles: [], events: [], catalogs: {} });
   readonly status = signal('Connecting');
   private stream?: EventSource;
   private tooltipFrame?: number;
@@ -282,6 +287,18 @@ class AppComponent implements OnInit, OnDestroy {
   resourceCount(resource: any): string {
     const count = Number(resource?.count);
     return Number.isFinite(count) ? Math.floor(count).toLocaleString('en-US') : '—';
+  }
+  sanctumFloor(): string {
+    const raw = this.state().sanctum?.floor;
+    if (raw == null) return '—';
+    const floor = Number(raw);
+    return Number.isFinite(floor) ? Math.floor(floor).toLocaleString('en-US') : '—';
+  }
+  sanctumBonus(): string {
+    const raw = this.state().sanctum?.resourceBonusRate;
+    if (raw == null) return '+—%';
+    const bonus = Number(raw) * 100;
+    return Number.isFinite(bonus) ? `+${bonus.toLocaleString('en-US', { maximumFractionDigits: 2 })}%` : '+—%';
   }
   lootRates(): any[] {
     const durationBySlot = new Map<number, number>();
@@ -356,7 +373,10 @@ class AppComponent implements OnInit, OnDestroy {
   riftStarAverage(slot: number): string {
     const targetTitle = 'Rift-Star Expanse-15';
     const durations = this.slotBattles(slot)
-      .filter(battle => this.battlePlaceTitle((battle as any).payload) === targetTitle)
+      .filter(battle => {
+        const payload = (battle as any).payload;
+        return payload?.result === 'win' && this.battlePlaceTitle(payload) === targetTitle;
+      })
       .slice(0, 50)
       .map(battle => Number((battle as any).payload?.durationSeconds))
       .filter(duration => Number.isFinite(duration));

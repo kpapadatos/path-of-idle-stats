@@ -23,7 +23,7 @@ public sealed class Plugin : BasePlugin
 {
     public const string PluginGuid = "local.pathofidle.stats";
     public const string PluginName = "Path of Idle Stats";
-    public const string PluginVersion = "0.3.0";
+    public const string PluginVersion = "0.4.0";
 
     private static Plugin? Instance;
     private static readonly object StateLock = new();
@@ -90,7 +90,7 @@ public sealed class Plugin : BasePlugin
         ExportPendingIcons(32);
         Instance?.writer?.Enqueue("snapshot.slots", new { slots });
         Instance?.writer?.Enqueue("snapshot.heroes", new { heroes = allHeroes });
-        Instance?.writer?.Enqueue("snapshot.resources", new { resources = DescribePrimaryResources() });
+        Instance?.writer?.Enqueue("snapshot.resources", new { resources = DescribePrimaryResources(), sanctum = DescribeSanctum() });
     }
 
     public override bool Unload()
@@ -183,6 +183,7 @@ public sealed class Plugin : BasePlugin
             enemies = capture.Enemies,
             loot = AggregateLoot(ReadList(Read(__instance, "dropItemList")).Select(DescribeItem)),
             resources = DescribePrimaryResources(),
+            sanctum = DescribeSanctum(),
             heroes
         });
         Instance?.writer?.Enqueue("snapshot.heroes", new { heroes });
@@ -341,6 +342,22 @@ public sealed class Plugin : BasePlugin
             });
         }
         return result.OrderBy(resource => Convert.ToInt32(resource["id"], CultureInfo.InvariantCulture)).ToList();
+    }
+
+    private static Dictionary<string, object?> DescribeSanctum()
+    {
+        var dataManager = ReadStatic("Game", "dataMgr");
+        var season = Read(dataManager, "nowSeasonData");
+        var advData = Read(season, "advData");
+        var saveMap = Read(Read(advData, "mapData"), "saveMapData");
+        var floor = ReadNullableInt(saveMap, "towerFloor");
+        return new Dictionary<string, object?>
+        {
+            ["floor"] = floor,
+            // The Sanctum grants +2% primary-resource gain per completed floor.
+            // The API represents percentages as rates, hence 121 => 2.42 => +242%.
+            ["resourceBonusRate"] = floor is null ? null : floor.Value * 0.02d
+        };
     }
 
     private static Dictionary<string, object?> DescribeAttributes(object? attrData)

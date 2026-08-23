@@ -10,7 +10,7 @@ const webRoot = join(root, 'dist', 'dashboard', 'browser');
 const iconRoot = join(root, 'data', 'icons');
 const snapshotRequest = 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\PathOfIdle\\BepInEx\\PathOfIdleStats\\snapshot.request';
 const clients = new Set();
-const state = { connected: false, gameRunning: false, updatedAt: null, heroes: [], slots: [], resources: [], inventory: [], battles: [], events: [], catalogs: {} };
+const state = { connected: false, gameRunning: false, updatedAt: null, heroes: [], slots: [], resources: [], sanctum: null, inventory: [], battles: [], events: [], catalogs: {} };
 let lastGameHeartbeat = 0;
 await mkdir(dataDirectory, { recursive: true });
 
@@ -27,11 +27,15 @@ function applyEvent(event) {
   }
   if (event.type === 'snapshot.heroes') state.heroes = event.payload?.heroes ?? event.payload ?? [];
   if (event.type === 'snapshot.slots') state.slots = event.payload?.slots ?? [];
-  if (event.type === 'snapshot.resources') state.resources = event.payload?.resources ?? [];
+  if (event.type === 'snapshot.resources') {
+    state.resources = event.payload?.resources ?? [];
+    state.sanctum = event.payload?.sanctum ?? state.sanctum;
+  }
   if (event.type === 'snapshot.inventory') state.inventory = event.payload?.items ?? event.payload ?? [];
   if (event.type.startsWith('catalog.')) state.catalogs[event.type.slice(8)] = event.payload?.entries ?? [];
   if (event.type === 'battle.ended') {
     state.resources = event.payload?.resources ?? state.resources;
+    state.sanctum = event.payload?.sanctum ?? state.sanctum;
     state.battles.unshift(event);
     const perSlot = new Map();
     state.battles = state.battles.filter(battle => {
