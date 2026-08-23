@@ -461,10 +461,16 @@ class AppComponent implements OnInit, OnDestroy {
   effectTitle(effect: any): string {
     const description = String(effect?.englishDescription || effect?.description || '');
     const stackName = /^1\s+stack(?:\s+of)?\s+(.+)$/i.exec(description.trim())?.[1]?.trim();
-    return String(effect?.englishName || effect?.name || stackName || effect?.type || 'Effect');
+    const verifiedOriginTitle = effect?.originVerified && (effect?.type === 'Aura' || effect?.type === 'Buff')
+      ? effect?.sourceSkillName || effect?.originName
+      : null;
+    return String(effect?.englishName || effect?.name || verifiedOriginTitle || stackName || effect?.type || 'Effect');
   }
   effectSourceLabel(effect: any): string {
-    return String(effect?.sourceName || (effect?.originVerified ? effect?.sourceSkillName || effect?.originName : '') || 'Unknown');
+    const actor = String(effect?.sourceName || '').trim();
+    const origin = effect?.originVerified ? String(effect?.sourceSkillName || effect?.originName || '').trim() : '';
+    if (origin && actor && origin !== actor) return `${origin} · ${actor}`;
+    return origin || actor || 'Unknown';
   }
   effectIconUrl(effect: any): string | null { return effect?.iconUrl ? String(effect.iconUrl) : null; }
   effectBorderClass(effect: any): string {

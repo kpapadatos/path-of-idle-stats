@@ -138,7 +138,7 @@ public sealed class Plugin : BasePlugin
         if (__result is null || currentEffectSkill is null) return;
         var pointer = NativePointer(__result);
         if (pointer == 0) return;
-        var origin = DescribeSkillOrigin(currentEffectSkill, ReadNullableInt(Read(currentEffectSkill, "tSkillData"), "id"));
+        var origin = DescribeSkillOrigin(currentEffectSkill, ReadNullableInt(Read(currentEffectSkill, "tSkillData"), "id"), Read(currentEffectSkill, "ownCombatData"));
         origin["originKind"] = "skill";
         lock (StateLock) EffectOrigins[pointer] = origin;
     }
@@ -347,13 +347,19 @@ public sealed class Plugin : BasePlugin
         var sourceHeroSave = Read(sourceHero, "saveHeroData");
         var sourceEnemy = Read(source, "tEnemyData");
         var sourceName = ReadString(sourceHeroSave, "name") ?? EnglishName(sourceEnemy, ReadString(sourceEnemy, "name"));
-        var origin = FindExactAbilityOrigin(targetCombat, ability);
+        var origin = FindExactAbilityOrigin(targetCombat, ability) ?? FindExactItemOrigin(sourceHero, table);
         var tableName = ReadString(table, "name");
         var tableEnglishName = ReadString(table, "name_en") ?? EnglishName(table, tableName);
         var tableDescription = ReadString(table, "des");
         var tableEnglishDescription = ReadString(table, "des_en") ?? EnglishText(table, "_des", tableDescription);
-        var icon = displayedIconKey ?? ReadString(table, "icon") ?? Convert.ToString(origin?["iconKey"], CultureInfo.InvariantCulture);
         var typeId = ReadNullableInt(table, "type");
+        var tableIcon = ReadString(table, "icon");
+        var originIcon = Convert.ToString(origin?["iconKey"], CultureInfo.InvariantCulture);
+        var useVerifiedOriginPresentation = typeId is 1 or 6 && origin is not null;
+        var tableHasDistinctIcon = !string.IsNullOrWhiteSpace(tableIcon)
+            && !tableIcon.StartsWith("ability_", StringComparison.OrdinalIgnoreCase);
+        var icon = displayedIconKey
+            ?? (tableHasDistinctIcon ? tableIcon : useVerifiedOriginPresentation && !string.IsNullOrWhiteSpace(originIcon) ? originIcon : tableIcon);
         QueueIcon(icon);
         return new Dictionary<string, object?>
         {
@@ -379,6 +385,8 @@ public sealed class Plugin : BasePlugin
             ["sourceKind"] = sourceHero is not null ? "hero" : sourceEnemy is not null ? "enemy" : "unknown",
             ["sourceSkillId"] = origin?["skillId"],
             ["sourceSkillName"] = origin?["englishName"] ?? origin?["name"],
+            ["sourceIconKey"] = originIcon,
+            ["sourceIconUrl"] = IconUrl(originIcon),
             ["originKind"] = origin?["originKind"],
             ["originName"] = origin?["englishName"] ?? origin?["name"],
             ["originVerified"] = origin is not null,
@@ -401,7 +409,7 @@ public sealed class Plugin : BasePlugin
                 .FirstOrDefault(skill => ReadNullableInt(Read(skill, "tSkillData"), "id") == auraSkillId);
             if (auraSkill is not null)
             {
-                var origin = DescribeSkillOrigin(auraSkill, auraSkillId);
+                var origin = DescribeSkillOrigin(auraSkill, auraSkillId, sourceCombat);
                 origin["originKind"] = "skill";
                 return origin;
             }
@@ -409,7 +417,7 @@ public sealed class Plugin : BasePlugin
         return null;
     }
 
-    private static Dictionary<string, object?> DescribeSkillOrigin(object skill, int? knownSkillId)
+    private static Dictionary<string, object?> DescribeSkillOrigin(object skill, int? knownSkillId, object? knownSourceCombat = null)
     {
         var skillTable = Read(skill, "tSkillData");
         var info = Read(skill, "tSkillInfoData");
@@ -417,7 +425,7 @@ public sealed class Plugin : BasePlugin
         var skillId = knownSkillId ?? ReadNullableInt(skillTable, "id");
         if (talentTable is null && skillId is > 0)
         {
-            var hero = Read(Read(skill, "ownCombatData"), "heroData");
+            var hero = Read(knownSourceCombat ?? Read(skill, "ownCombatData"), "heroData");
             talentTable = ReadValues(Read(Read(hero, "heroTalentData"), "talentDic"))
                 .Select(talent => Read(talent, "tTalentData"))
                 .FirstOrDefault(table => ReadNullableInt(table, "skillId") == skillId);
@@ -425,6 +433,8 @@ public sealed class Plugin : BasePlugin
         var titleRow = talentTable ?? skillTable;
         var name = ReadString(titleRow, "name");
         var description = ReadString(info, "des");
+        var icon = ReadString(talentTable, "icon");
+        QueueIcon(icon);
         return new Dictionary<string, object?>
         {
             ["skillId"] = skillId,
@@ -432,7 +442,41 @@ public sealed class Plugin : BasePlugin
             ["englishName"] = EnglishName(titleRow, name),
             ["description"] = description,
             ["englishDescription"] = ReadString(info, "des_en") ?? EnglishText(info, "_des", description),
-            ["iconKey"] = ReadString(talentTable, "icon")
+            ["iconKey"] = icon
+        };
+    }
+
+    private static Dictionary<string, object?>? FindExactItemOrigin(object? sourceHero, object? abilityTable)
+    {
+        if (sourceHero is null || abilityTable is null) return null;
+        var matches = new Dictionary<nint, object>();
+        foreach (var field in ReadList(Read(Read(sourceHero, "heroEquipData"), "fieldList")))
+        {
+            var item = Read(field, "itemData");
+            if (item is null) continue;
+            var equip = Read(item, "itemEquipData");
+            var affixes = new List<object>();
+            affixes.AddRange(ReadList(Read(equip, "affixList")));
+            var runewordAffix = Read(equip, "runewordsAffixData");
+            if (Read(runewordAffix, "tAbilityData") is not null) affixes.Add(runewordAffix!);
+            affixes.AddRange(ReadList(runewordAffix));
+            foreach (var rune in ReadList(Read(equip, "slotRuneList")))
+                affixes.AddRange(ReadList(Read(rune, "affixList")));
+            foreach (var affix in affixes)
+            {
+                if (NativePointer(Read(affix, "tAbilityData")!) != NativePointer(abilityTable)) continue;
+                matches[NativePointer(item)] = item;
+            }
+        }
+        if (matches.Count != 1) return null;
+        var described = DescribeItem(matches.Values.Single());
+        return new Dictionary<string, object?>
+        {
+            ["originKind"] = "item",
+            ["itemId"] = described.GetValueOrDefault("id"),
+            ["name"] = described.GetValueOrDefault("name"),
+            ["englishName"] = described.GetValueOrDefault("englishName"),
+            ["iconKey"] = described.GetValueOrDefault("iconKey")
         };
     }
 
