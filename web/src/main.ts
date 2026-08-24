@@ -7,7 +7,9 @@ type TelemetryEvent = { type: string; timestamp?: string; payload?: unknown } & 
 type CombatTimelineEntry = { id: number; capturedAt: number; stats: any[]; effects: any[] };
 type CodexRarityKey = 'rare' | 'legendary' | 'set' | 'unique' | 'mythic';
 type CodexSnapshot = { updatedAt: string | null; items: any[]; affixPools: Array<{ id: number; stats: any[] }>; rarities: any[] };
-type ScannerFilter = { id: string; title: string; enabled: boolean; itemKeys: string[]; anchorItemKey: string | null; statIds: number[]; minimumAttributeMatches: number };
+type ScannerFilter = { id: string; title: string; groupId: string | null; enabled: boolean; itemKeys: string[]; anchorItemKey: string | null; statIds: number[]; minimumAttributeMatches: number };
+type ScannerFilterGroup = { id: string; title: string; collapsed: boolean };
+type ScannerPersistedState = { schemaVersion: number; filters: ScannerFilter[]; groups: ScannerFilterGroup[]; autoEnabled: boolean };
 type ScannerMatch = any & { _matchedFilterIds: string[] };
 type TelemetryState = {
   connected: boolean;
@@ -238,6 +240,9 @@ type TelemetryState = {
           <button type="button" (click)="createScannerFilter()" [disabled]="codexLoading()" class="rounded-lg border border-amber-700 bg-amber-950/30 px-4 py-2 text-sm font-semibold text-amber-300 transition hover:bg-amber-950/60 disabled:opacity-40">
             <i class="fa-solid fa-plus mr-2" aria-hidden="true"></i>Create item filter
           </button>
+          <button type="button" (click)="createScannerFilterGroup()" class="rounded-lg border border-zinc-700 bg-zinc-900/60 px-4 py-2 text-sm font-semibold text-zinc-300 transition hover:border-zinc-600 hover:bg-zinc-800">
+            <i class="fa-solid fa-folder-plus mr-2" aria-hidden="true"></i>Create filter group
+          </button>
           <span *ngIf="scannerError()" class="ml-2 text-sm text-rose-300">{{ scannerError() }}</span>
           <div class="ml-auto flex items-center gap-1.5">
             <label class="flex cursor-pointer select-none items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-zinc-300 hover:bg-zinc-900">
@@ -259,9 +264,10 @@ type TelemetryState = {
         </section>
         <p *ngIf="scannerHasRun() && !scannerMatches().length && !scannerScanning()" class="rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-6 text-center text-sm text-zinc-500">No items in the inventory, warehouse storage, or warehouse vault matched the enabled filters.</p>
 
-        <div *ngIf="scannerFilters().length; else noScannerFilters" class="grid grid-cols-3 gap-3">
-          <article *ngFor="let filter of scannerFilters(); let filterIndex = index; trackBy: trackScannerFilter" class="min-w-0 rounded-xl border border-zinc-700 bg-zinc-950 p-3">
+        <ng-template #scannerFilterCard let-filter let-filterIndex="filterIndex">
+          <article [class]="draggingScannerFilterId() === filter.id ? 'min-w-0 rounded-xl border border-amber-600 bg-zinc-950 p-3 opacity-50 shadow-lg' : 'min-w-0 rounded-xl border border-zinc-700 bg-zinc-950 p-3 transition hover:border-zinc-600'">
             <div class="flex items-center gap-2">
+              <button type="button" draggable="true" (dragstart)="startScannerFilterDrag($event, filter.id)" (dragend)="finishScannerDrag()" class="flex h-7 w-5 shrink-0 cursor-grab items-center justify-center rounded text-zinc-700 hover:bg-zinc-900 hover:text-zinc-400 active:cursor-grabbing" [attr.aria-label]="'Drag ' + scannerFilterDisplayTitle(filter, filterIndex) + ' into a group'" title="Drag into a group"><i class="fa-solid fa-grip-vertical text-xs"></i></button>
               <label class="flex shrink-0 cursor-pointer items-center" [attr.aria-label]="(filter.title || 'Item filter ' + (filterIndex + 1)) + (filter.enabled ? ', enabled' : ', disabled')"><input type="checkbox" [checked]="filter.enabled" (change)="setScannerFilterEnabled(filter.id, $event)" class="h-4 w-4 accent-amber-500"></label>
               <div class="min-w-0 flex-1">
                 <input *ngIf="renamingScannerFilterId() === filter.id; else scannerFilterTitle" type="text" autofocus [value]="scannerFilterTitleDraft()" (focus)="$any($event.target).select()" (input)="setScannerFilterTitleDraft($event)" (click)="$event.stopPropagation()" (dblclick)="$event.stopPropagation()" (keydown.enter)="commitScannerFilterTitle(filter.id)" (keydown.escape)="cancelScannerFilterTitleEdit($event)" (blur)="commitScannerFilterTitle(filter.id)" [attr.aria-label]="'Rename ' + scannerFilterDisplayTitle(filter, filterIndex)" class="h-8 w-full rounded-md border border-amber-600 bg-zinc-900 px-2 text-sm font-semibold text-zinc-100 outline-none focus:ring-1 focus:ring-amber-500">
@@ -277,9 +283,49 @@ type TelemetryState = {
             </div>
             <div class="mt-3 border-t border-zinc-800 pt-3"><div class="mb-2 flex items-center justify-between gap-2"><p class="text-[10px] font-semibold uppercase tracking-wide text-zinc-600">Required attributes</p><span *ngIf="filter.statIds.length" class="text-[10px] text-zinc-600">At least {{ filter.minimumAttributeMatches }} of {{ filter.statIds.length }}</span></div><div class="flex flex-wrap gap-1.5"><span *ngFor="let stat of scannerFilterStats(filter); trackBy: trackCodexStat" class="rounded-md bg-zinc-900 px-2 py-1 text-xs text-zinc-400">{{ scannerStatTitle(stat) }}</span><span *ngIf="!filter.statIds.length" class="text-xs text-zinc-600">Any attributes</span></div></div>
           </article>
+        </ng-template>
+
+        <div *ngIf="scannerFilters().length || scannerFilterGroups().length; else noScannerFilters" class="space-y-3">
+          <section *ngIf="scannerFilterGroups().length || scannerUngroupedFilters().length" aria-label="Ungrouped filters" (dragover)="allowScannerFilterDrop($event, null)" (dragleave)="leaveScannerDropTarget($event, null)" (drop)="dropScannerFilter($event, null)" [class]="scannerDropTargetGroupId() === scannerUngroupedDropTarget ? 'rounded-xl border border-dashed border-amber-500 bg-amber-950/10 p-3 transition' : 'rounded-xl border border-dashed border-zinc-800 bg-zinc-950/30 p-3 transition'">
+            <div *ngIf="scannerFilterGroups().length" class="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-zinc-500"><i class="fa-solid fa-inbox text-zinc-600"></i><span>Ungrouped</span><span class="rounded-full bg-zinc-900 px-2 py-0.5 text-[10px] text-zinc-600">{{ scannerUngroupedFilters().length }}</span><span class="ml-auto text-[10px] font-normal normal-case text-zinc-700">Drop filters here to remove them from a group</span></div>
+            <div *ngIf="scannerUngroupedFilters().length; else emptyUngrouped" class="grid grid-cols-3 gap-3">
+              <ng-container *ngFor="let filter of scannerUngroupedFilters(); trackBy: trackScannerFilter"><ng-container *ngTemplateOutlet="scannerFilterCard; context: { $implicit: filter, filterIndex: scannerFilterIndex(filter) }"></ng-container></ng-container>
+            </div>
+            <ng-template #emptyUngrouped><div class="flex min-h-14 items-center justify-center rounded-lg border border-dashed border-zinc-800/70 text-xs text-zinc-700">Drop a filter here</div></ng-template>
+          </section>
+
+          <section *ngFor="let group of scannerFilterGroups(); trackBy: trackScannerFilterGroup" [attr.aria-label]="scannerFilterGroupDisplayTitle(group) + ' filter group'" (dragover)="allowScannerGroupDrop($event, group.id)" (dragleave)="leaveScannerDropTarget($event, group.id)" (drop)="dropOnScannerGroup($event, group.id)" [class]="scannerDropTargetGroupId() === group.id ? 'overflow-hidden rounded-xl border border-amber-500 bg-amber-950/10 shadow-lg transition' : 'overflow-hidden rounded-xl border border-zinc-700 bg-zinc-950/40 transition'">
+            <header class="flex h-12 items-center gap-2 border-b border-zinc-800 px-3">
+              <button type="button" draggable="true" (dragstart)="startScannerGroupDrag($event, group.id)" (dragend)="finishScannerDrag()" class="flex h-8 w-7 cursor-grab items-center justify-center rounded-md text-zinc-600 hover:bg-zinc-900 hover:text-zinc-300 active:cursor-grabbing" [attr.aria-label]="'Drag ' + scannerFilterGroupDisplayTitle(group) + ' to reorder'" title="Drag to reorder"><i class="fa-solid fa-grip-vertical"></i></button>
+              <i class="fa-regular fa-folder-open text-amber-500/80" aria-hidden="true"></i>
+              <div class="min-w-0 flex-1">
+                <input *ngIf="renamingScannerFilterGroupId() === group.id; else scannerGroupTitle" type="text" autofocus [value]="scannerFilterGroupTitleDraft()" (focus)="$any($event.target).select()" (input)="setScannerFilterGroupTitleDraft($event)" (click)="$event.stopPropagation()" (keydown.enter)="commitScannerFilterGroupTitle(group.id)" (keydown.escape)="cancelScannerFilterGroupTitleEdit($event)" (blur)="commitScannerFilterGroupTitle(group.id)" [attr.aria-label]="'Rename ' + scannerFilterGroupDisplayTitle(group)" class="h-8 w-full rounded-md border border-amber-600 bg-zinc-900 px-2 text-sm font-semibold text-zinc-100 outline-none focus:ring-1 focus:ring-amber-500">
+                <ng-template #scannerGroupTitle><button type="button" (click)="startScannerFilterGroupTitleEdit(group)" class="block max-w-full truncate rounded px-1 text-left text-sm font-semibold text-zinc-200 hover:bg-zinc-900" title="Click to rename">{{ scannerFilterGroupDisplayTitle(group) }}</button></ng-template>
+              </div>
+              <span class="rounded-full bg-zinc-900 px-2 py-0.5 text-[10px] text-zinc-500">{{ scannerFiltersForGroup(group.id).length }}</span>
+              <button type="button" (click)="toggleScannerFilterGroup(group.id)" [attr.aria-label]="(group.collapsed ? 'Expand ' : 'Collapse ') + scannerFilterGroupDisplayTitle(group)" class="flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 hover:bg-zinc-900 hover:text-zinc-200"><i [class]="group.collapsed ? 'fa-solid fa-chevron-down text-xs' : 'fa-solid fa-chevron-up text-xs'"></i></button>
+              <button type="button" (click)="requestScannerFilterGroupDeletion(group.id)" [attr.aria-label]="'Delete ' + scannerFilterGroupDisplayTitle(group)" [attr.title]="scannerFiltersForGroup(group.id).length ? 'Delete group and its filters' : 'Delete empty group'" class="flex h-8 w-8 items-center justify-center rounded-lg text-zinc-600 hover:bg-rose-950/50 hover:text-rose-300"><i class="fa-solid fa-trash"></i></button>
+            </header>
+            <div *ngIf="!group.collapsed" class="p-3">
+              <div *ngIf="scannerFiltersForGroup(group.id).length; else emptyScannerGroup" class="grid grid-cols-3 gap-3">
+                <ng-container *ngFor="let filter of scannerFiltersForGroup(group.id); trackBy: trackScannerFilter"><ng-container *ngTemplateOutlet="scannerFilterCard; context: { $implicit: filter, filterIndex: scannerFilterIndex(filter) }"></ng-container></ng-container>
+              </div>
+              <ng-template #emptyScannerGroup><div class="flex min-h-20 items-center justify-center rounded-lg border border-dashed border-zinc-800 text-xs text-zinc-600"><i class="fa-solid fa-arrow-down mr-2 text-zinc-700"></i>Drop filters into this group</div></ng-template>
+            </div>
+          </section>
         </div>
         <ng-template #noScannerFilters><div class="rounded-xl border border-dashed border-zinc-800 py-16 text-center"><i class="fa-solid fa-filter mb-3 text-2xl text-zinc-700"></i><p class="text-sm text-zinc-500">Create an item filter to start scanning the inventory.</p></div></ng-template>
       </section>
+      </div>
+
+      <div *ngIf="pendingScannerFilterGroupDeletion() as group" class="fixed inset-0 z-[70] flex items-center justify-center bg-black/80 p-4" (click)="cancelScannerFilterGroupDeletion()">
+        <section role="alertdialog" aria-modal="true" [attr.aria-label]="'Delete ' + scannerFilterGroupDisplayTitle(group)" class="w-full max-w-md overflow-hidden rounded-2xl border border-rose-900 bg-zinc-950 shadow-2xl" (click)="$event.stopPropagation()">
+          <div class="flex items-start gap-4 p-5">
+            <div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-rose-800 bg-rose-950/60 text-rose-300"><i class="fa-solid fa-triangle-exclamation"></i></div>
+            <div class="min-w-0"><h2 class="text-lg font-semibold text-zinc-100">Delete {{ scannerFilterGroupDisplayTitle(group) }}?</h2><p class="mt-2 text-sm leading-6 text-zinc-400">This group contains <strong class="text-zinc-200">{{ scannerFiltersForGroup(group.id).length }} filter{{ scannerFiltersForGroup(group.id).length === 1 ? '' : 's' }}</strong>. Deleting the group will permanently delete every filter inside it too.</p><p class="mt-2 text-xs font-medium text-rose-300">This action cannot be undone.</p></div>
+          </div>
+          <footer class="flex justify-end gap-2 border-t border-zinc-800 bg-zinc-950/80 px-5 py-4"><button type="button" autofocus (click)="cancelScannerFilterGroupDeletion()" class="rounded-lg border border-zinc-700 px-4 py-2 text-sm font-semibold text-zinc-300 hover:bg-zinc-800">Cancel</button><button type="button" (click)="confirmScannerFilterGroupDeletion()" class="rounded-lg border border-rose-700 bg-rose-950/50 px-4 py-2 text-sm font-semibold text-rose-200 hover:bg-rose-900/60"><i class="fa-solid fa-trash mr-2"></i>Delete group and filters</button></footer>
+        </section>
       </div>
 
       <div *ngIf="selectedCodexItem() as item" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" (click)="closeCodexItem()">
@@ -369,7 +415,14 @@ type TelemetryState = {
             <div class="flex items-start gap-3"><div [class]="'h-12 w-12 shrink-0 rounded-lg border p-1.5 ' + rarityIconClass($any(item).rarity)"><img *ngIf="$any(item).iconUrl" [src]="$any(item).iconUrl" class="h-full w-full object-contain" alt=""></div><div><h3 class="font-semibold text-zinc-100">{{ $any(item).englishName || $any(item).name }}</h3><p class="text-xs text-amber-300">{{ $any(item).qualityName || scannerRarityLabel($any(item).rarity) }} · Level {{ $any(item).level ?? '?' }} · {{ $any(item).partName || 'Equipment' }}</p><p class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-cyan-300">{{ scannerStorageLabel($any(item)) }}</p></div></div>
             <div class="mt-3 grid grid-cols-3 gap-2 border-t border-zinc-800 pt-2 text-[10px] text-zinc-500"><span>Forge <b class="text-zinc-300">+{{ $any(item).forgeLevel ?? 0 }}</b></span><span>Main <b class="text-zinc-300">{{ $any(item).mainAttributeValue ?? 0 }}</b></span><span>Slots <b class="text-zinc-300">{{ $any(item).slotCount ?? 0 }}</b></span></div>
             <div class="mt-2 space-y-1 border-t border-zinc-800 pt-2"><p *ngFor="let stat of $any(item).affixes; trackBy: trackInventoryAffix" class="whitespace-pre-line text-xs text-zinc-300"><span class="mr-1 text-zinc-600">{{ $any(stat).rank ?? '?' }}</span>{{ inventoryAffixText($any(stat)) }}</p></div>
-            <p class="mt-2 text-[10px] text-zinc-600">Matched {{ $any(item)._matchedFilterIds.length }} enabled filter{{ $any(item)._matchedFilterIds.length === 1 ? '' : 's' }}</p>
+            <div *ngIf="scannerMatchedFilterDetails($any(item)) as matchedFilters" class="mt-2 border-t border-zinc-800 pt-2">
+              <p class="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-zinc-600">Matched filters ({{ matchedFilters.length }})</p>
+              <div class="space-y-1">
+                <div *ngFor="let match of matchedFilters; trackBy: trackScannerMatchedFilter" class="flex items-center gap-2 rounded-md bg-zinc-900/80 px-2 py-1.5 text-xs">
+                  <i class="fa-solid fa-filter shrink-0 text-[9px] text-amber-500" aria-hidden="true"></i><span class="min-w-0 flex-1 truncate font-medium text-zinc-200">{{ match.filterTitle }}</span><span *ngIf="match.groupTitle" class="flex min-w-0 max-w-[45%] items-center gap-1 text-[10px] text-zinc-500"><i class="fa-regular fa-folder shrink-0" aria-hidden="true"></i><span class="truncate">{{ match.groupTitle }}</span></span>
+                </div>
+              </div>
+            </div>
           </ng-container>
         </ng-container>
         <ng-template #scannerNonMatchTooltip>
@@ -556,8 +609,17 @@ class AppComponent implements OnInit, OnDestroy {
   readonly codexLoading = signal(false);
   readonly codexError = signal<string | null>(null);
   readonly scannerFilters = signal<ScannerFilter[]>([]);
+  readonly scannerFilterGroups = signal<ScannerFilterGroup[]>([]);
+  readonly scannerUngroupedFilters = computed(() => this.scannerFilters().filter(filter => !filter.groupId || !this.scannerFilterGroups().some(group => group.id === filter.groupId)));
+  readonly draggingScannerFilterId = signal<string | null>(null);
+  readonly draggingScannerFilterGroupId = signal<string | null>(null);
+  readonly scannerDropTargetGroupId = signal<string | null>(null);
+  readonly scannerUngroupedDropTarget = '__ungrouped__';
   readonly renamingScannerFilterId = signal<string | null>(null);
   readonly scannerFilterTitleDraft = signal('');
+  readonly renamingScannerFilterGroupId = signal<string | null>(null);
+  readonly scannerFilterGroupTitleDraft = signal('');
+  readonly pendingScannerFilterGroupDeletion = signal<ScannerFilterGroup | null>(null);
   readonly editingScannerFilterId = signal<string | null>(null);
   readonly scannerItemSearch = signal('');
   readonly scannerAvailableStatSearch = signal('');
@@ -567,6 +629,8 @@ class AppComponent implements OnInit, OnDestroy {
   readonly scannerMatches = signal<ScannerMatch[]>([]);
   readonly scannerError = signal<string | null>(null);
   readonly scannerAutoEnabled = signal(false);
+  readonly scannerPersistenceReady = signal(false);
+  readonly scannerPersistenceError = signal<string | null>(null);
   readonly scannerTooltip = signal<{ kind: 'match'; item: ScannerMatch } | { kind: 'disabled'; items: any[] } | { kind: 'auto' } | null>(null);
   readonly catalogs = signal<Record<string, any[]>>({});
   readonly selectedHero = signal<any | null>(null);
@@ -692,6 +756,9 @@ class AppComponent implements OnInit, OnDestroy {
   private catalogRefreshRequested = false;
   private lastInventoryItemAddedTimestamp: string | null = null;
   private scannerAudioContext?: AudioContext;
+  private scannerPersistenceTimer?: number;
+  private scannerPersistenceDirty = false;
+  private scannerPersistenceSaving = false;
   private destroyed = false;
   private readonly nativePointerMove = (event: PointerEvent) => {
     if (!this.activeTooltipId || !this.activeTooltipAnchor) return;
@@ -707,6 +774,7 @@ class AppComponent implements OnInit, OnDestroy {
 
   async ngOnInit() {
     this.restoreCompendiumPreferences();
+    await this.initializeScannerServerState();
     this.zone.runOutsideAngular(() => document.addEventListener('pointermove', this.nativePointerMove, { passive: true }));
     try {
       const [live, catalogs] = await Promise.all([
@@ -756,6 +824,7 @@ class AppComponent implements OnInit, OnDestroy {
     document.removeEventListener('pointermove', this.nativePointerMove);
     if (this.tooltipFrame) cancelAnimationFrame(this.tooltipFrame);
     if (this.tooltipValidationFrame) cancelAnimationFrame(this.tooltipValidationFrame);
+    if (this.scannerPersistenceTimer) window.clearTimeout(this.scannerPersistenceTimer);
     void this.scannerAudioContext?.close();
   }
   selectPageTab(tab: 'battles' | 'compendium' | 'codex' | 'scanner') {
@@ -928,7 +997,7 @@ class AppComponent implements OnInit, OnDestroy {
   async createScannerFilter() {
     await this.ensureScannerCodex();
     if (!this.codexSnapshot().items.length) return;
-    const filter: ScannerFilter = { id: this.newScannerFilterId(), title: '', enabled: true, itemKeys: [], anchorItemKey: null, statIds: [], minimumAttributeMatches: 1 };
+    const filter: ScannerFilter = { id: this.newScannerFilterId(), title: '', groupId: null, enabled: true, itemKeys: [], anchorItemKey: null, statIds: [], minimumAttributeMatches: 1 };
     this.scannerFilters.update(filters => [...filters, filter]);
     this.invalidateScannerResults();
     this.saveScannerFilters();
@@ -952,6 +1021,139 @@ class AppComponent implements OnInit, OnDestroy {
   setScannerFilterEnabled(id: string, event: Event) {
     const enabled = (event.target as HTMLInputElement).checked;
     this.updateScannerFilter(id, filter => ({ ...filter, enabled }));
+  }
+  scannerFilterIndex(filter: ScannerFilter): number { return Math.max(0, this.scannerFilters().findIndex(entry => entry.id === filter.id)); }
+  scannerFiltersForGroup(groupId: string): ScannerFilter[] { return this.scannerFilters().filter(filter => filter.groupId === groupId); }
+  scannerMatchedFilterDetails(item: ScannerMatch): Array<{ id: string; filterTitle: string; groupTitle: string | null }> {
+    const matchedIds = new Set(Array.isArray(item?._matchedFilterIds) ? item._matchedFilterIds : []);
+    const groups = new Map(this.scannerFilterGroups().map(group => [group.id, this.scannerFilterGroupDisplayTitle(group)]));
+    return this.scannerFilters().flatMap((filter, index) => matchedIds.has(filter.id) ? [{ id: filter.id, filterTitle: this.scannerFilterDisplayTitle(filter, index), groupTitle: filter.groupId ? groups.get(filter.groupId) || null : null }] : []);
+  }
+  trackScannerMatchedFilter(_index: number, match: { id: string }): string { return match.id; }
+  trackScannerFilterGroup(_index: number, group: ScannerFilterGroup): string { return group.id; }
+  createScannerFilterGroup() {
+    const group: ScannerFilterGroup = { id: this.newScannerFilterGroupId(), title: `Filter group ${this.scannerFilterGroups().length + 1}`, collapsed: false };
+    this.scannerFilterGroups.update(groups => [...groups, group]);
+    this.saveScannerFilterGroups();
+    this.startScannerFilterGroupTitleEdit(group);
+  }
+  scannerFilterGroupDisplayTitle(group: ScannerFilterGroup): string { return group.title || 'Untitled group'; }
+  startScannerFilterGroupTitleEdit(group: ScannerFilterGroup) {
+    this.scannerFilterGroupTitleDraft.set(this.scannerFilterGroupDisplayTitle(group));
+    this.renamingScannerFilterGroupId.set(group.id);
+  }
+  setScannerFilterGroupTitleDraft(event: Event) { this.scannerFilterGroupTitleDraft.set((event.target as HTMLInputElement).value); }
+  commitScannerFilterGroupTitle(id: string) {
+    if (this.renamingScannerFilterGroupId() !== id) return;
+    const title = this.scannerFilterGroupTitleDraft().trim() || 'Untitled group';
+    this.scannerFilterGroups.update(groups => groups.map(group => group.id === id ? { ...group, title } : group));
+    this.renamingScannerFilterGroupId.set(null);
+    this.saveScannerFilterGroups();
+  }
+  cancelScannerFilterGroupTitleEdit(event: Event) {
+    event.preventDefault();
+    this.renamingScannerFilterGroupId.set(null);
+  }
+  toggleScannerFilterGroup(id: string) {
+    this.scannerFilterGroups.update(groups => groups.map(group => group.id === id ? { ...group, collapsed: !group.collapsed } : group));
+    this.saveScannerFilterGroups();
+  }
+  requestScannerFilterGroupDeletion(id: string) {
+    const group = this.scannerFilterGroups().find(entry => entry.id === id);
+    if (!group) return;
+    if (this.scannerFiltersForGroup(id).length) {
+      this.pendingScannerFilterGroupDeletion.set(group);
+      return;
+    }
+    this.deleteScannerFilterGroup(id);
+  }
+  cancelScannerFilterGroupDeletion() { this.pendingScannerFilterGroupDeletion.set(null); }
+  confirmScannerFilterGroupDeletion() {
+    const group = this.pendingScannerFilterGroupDeletion();
+    if (!group) return;
+    this.pendingScannerFilterGroupDeletion.set(null);
+    this.deleteScannerFilterGroup(group.id);
+  }
+  private deleteScannerFilterGroup(id: string) {
+    const deletedFilterIds = new Set(this.scannerFiltersForGroup(id).map(filter => filter.id));
+    this.scannerFilters.update(filters => filters.filter(filter => filter.groupId !== id));
+    this.scannerFilterGroups.update(groups => groups.filter(group => group.id !== id));
+    if (this.renamingScannerFilterGroupId() === id) this.renamingScannerFilterGroupId.set(null);
+    if (this.editingScannerFilterId() && deletedFilterIds.has(this.editingScannerFilterId()!)) this.closeScannerFilter();
+    this.saveScannerFilters();
+    this.saveScannerFilterGroups();
+    if (deletedFilterIds.size) this.invalidateScannerResults();
+  }
+  startScannerFilterDrag(event: DragEvent, id: string) {
+    this.draggingScannerFilterId.set(id);
+    this.draggingScannerFilterGroupId.set(null);
+    event.dataTransfer?.setData('text/plain', `scanner-filter:${id}`);
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+  }
+  startScannerGroupDrag(event: DragEvent, id: string) {
+    event.stopPropagation();
+    this.draggingScannerFilterGroupId.set(id);
+    this.draggingScannerFilterId.set(null);
+    event.dataTransfer?.setData('text/plain', `scanner-group:${id}`);
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+  }
+  allowScannerFilterDrop(event: DragEvent, groupId: string | null) {
+    if (!this.draggingScannerFilterId()) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+    this.scannerDropTargetGroupId.set(groupId || this.scannerUngroupedDropTarget);
+  }
+  allowScannerGroupDrop(event: DragEvent, groupId: string) {
+    if (!this.draggingScannerFilterId() && !this.draggingScannerFilterGroupId()) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+    this.scannerDropTargetGroupId.set(groupId);
+  }
+  leaveScannerDropTarget(event: DragEvent, groupId: string | null) {
+    const current = event.currentTarget as Node | null;
+    const next = event.relatedTarget as Node | null;
+    if (current && next && current.contains(next)) return;
+    const target = groupId || this.scannerUngroupedDropTarget;
+    if (this.scannerDropTargetGroupId() === target) this.scannerDropTargetGroupId.set(null);
+  }
+  dropScannerFilter(event: DragEvent, groupId: string | null) {
+    event.preventDefault();
+    event.stopPropagation();
+    const id = this.draggingScannerFilterId();
+    if (id) {
+      this.scannerFilters.update(filters => filters.map(filter => filter.id === id ? { ...filter, groupId } : filter));
+      this.saveScannerFilters();
+    }
+    this.finishScannerDrag();
+  }
+  dropOnScannerGroup(event: DragEvent, groupId: string) {
+    event.preventDefault();
+    event.stopPropagation();
+    const filterId = this.draggingScannerFilterId();
+    if (filterId) {
+      this.scannerFilters.update(filters => filters.map(filter => filter.id === filterId ? { ...filter, groupId } : filter));
+      this.saveScannerFilters();
+      this.finishScannerDrag();
+      return;
+    }
+    const draggedGroupId = this.draggingScannerFilterGroupId();
+    if (draggedGroupId && draggedGroupId !== groupId) {
+      this.scannerFilterGroups.update(groups => {
+        const moved = groups.find(group => group.id === draggedGroupId);
+        if (!moved) return groups;
+        const without = groups.filter(group => group.id !== draggedGroupId);
+        const targetIndex = without.findIndex(group => group.id === groupId);
+        without.splice(targetIndex < 0 ? without.length : targetIndex, 0, moved);
+        return without;
+      });
+      this.saveScannerFilterGroups();
+    }
+    this.finishScannerDrag();
+  }
+  finishScannerDrag() {
+    this.draggingScannerFilterId.set(null);
+    this.draggingScannerFilterGroupId.set(null);
+    this.scannerDropTargetGroupId.set(null);
   }
   scannerFilterDisplayTitle(filter: ScannerFilter, index: number): string { return filter.title || `Item filter ${index + 1}`; }
   startScannerFilterTitleEdit(filter: ScannerFilter, index: number) {
@@ -977,6 +1179,7 @@ class AppComponent implements OnInit, OnDestroy {
     const enabled = (event.target as HTMLInputElement).checked;
     this.scannerAutoEnabled.set(enabled);
     this.writeLocalStorage('path-of-idle-stats.scanner.auto', String(enabled));
+    this.scheduleScannerServerSave();
     this.lastInventoryItemAddedTimestamp = this.state().inventoryItemAdded?.timestamp || null;
     if (enabled) this.prepareScannerSound();
   }
@@ -1121,6 +1324,7 @@ class AppComponent implements OnInit, OnDestroy {
     return `${item?.storageLocation || 'inventory'}:${item?.storagePage ?? item?.storageGroupId ?? 'none'}:${item?.inventoryIndex ?? fallbackIndex}:${this.codexItemKey(item)}`;
   }
   private newScannerFilterId(): string { return `filter-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`; }
+  private newScannerFilterGroupId(): string { return `filter-group-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`; }
   private updateScannerFilter(id: string, update: (filter: ScannerFilter) => ScannerFilter) {
     this.scannerFilters.update(filters => filters.map(filter => filter.id === id ? this.normalizeScannerFilter(update(filter)) : filter));
     this.invalidateScannerResults();
@@ -1130,7 +1334,105 @@ class AppComponent implements OnInit, OnDestroy {
     const allowed = new Set(this.scannerPrimaryStats().map(stat => Number(stat?.id)));
     this.updateScannerFilter(id, filter => ({ ...filter, statIds: filter.statIds.filter(statId => allowed.has(statId)) }));
   }
-  private saveScannerFilters() { this.writeLocalStorage('path-of-idle-stats.scanner.filters', JSON.stringify(this.scannerFilters())); }
+  private saveScannerFilters() {
+    this.writeLocalStorage('path-of-idle-stats.scanner.filters', JSON.stringify(this.scannerFilters()));
+    this.scheduleScannerServerSave();
+  }
+  private saveScannerFilterGroups() {
+    this.writeLocalStorage('path-of-idle-stats.scanner.filter-groups', JSON.stringify(this.scannerFilterGroups()));
+    this.scheduleScannerServerSave();
+  }
+  private currentScannerPersistedState(): ScannerPersistedState {
+    return { schemaVersion: 1, filters: this.scannerFilters(), groups: this.scannerFilterGroups(), autoEnabled: this.scannerAutoEnabled() };
+  }
+  private normalizeScannerGroups(value: unknown): ScannerFilterGroup[] {
+    if (!Array.isArray(value)) return [];
+    const seenIds = new Set<string>();
+    return value.flatMap((entry: any) => {
+      if (!entry || typeof entry.id !== 'string' || seenIds.has(entry.id)) return [];
+      seenIds.add(entry.id);
+      return [{ id: entry.id, title: typeof entry.title === 'string' && entry.title.trim() ? entry.title.trim() : 'Untitled group', collapsed: entry.collapsed === true }];
+    });
+  }
+  private normalizeScannerFilters(value: unknown, groups: ScannerFilterGroup[]): ScannerFilter[] {
+    if (!Array.isArray(value)) return [];
+    const validGroupIds = new Set(groups.map(group => group.id));
+    const seenIds = new Set<string>();
+    return value.flatMap((entry: any) => {
+      if (!entry || typeof entry.id !== 'string' || seenIds.has(entry.id)) return [];
+      seenIds.add(entry.id);
+      const statIds = Array.isArray(entry.statIds) ? entry.statIds.map(Number).filter(Number.isFinite) : [];
+      const storedMinimum = Number(entry.minimumAttributeMatches);
+      return [this.normalizeScannerFilter({
+        id: entry.id,
+        title: typeof entry.title === 'string' ? entry.title.trim() : '',
+        groupId: typeof entry.groupId === 'string' && validGroupIds.has(entry.groupId) ? entry.groupId : null,
+        enabled: entry.enabled !== false,
+        itemKeys: Array.isArray(entry.itemKeys) ? entry.itemKeys.map(String) : [],
+        anchorItemKey: typeof entry.anchorItemKey === 'string' ? entry.anchorItemKey : null,
+        statIds,
+        minimumAttributeMatches: Number.isFinite(storedMinimum) ? storedMinimum : Math.max(1, statIds.length)
+      })];
+    });
+  }
+  private applyScannerPersistedState(value: any) {
+    const groups = this.normalizeScannerGroups(value?.groups);
+    const filters = this.normalizeScannerFilters(value?.filters, groups);
+    this.scannerFilterGroups.set(groups);
+    this.scannerFilters.set(filters);
+    this.scannerAutoEnabled.set(value?.autoEnabled === true);
+    this.writeLocalStorage('path-of-idle-stats.scanner.filters', JSON.stringify(filters));
+    this.writeLocalStorage('path-of-idle-stats.scanner.filter-groups', JSON.stringify(groups));
+    this.writeLocalStorage('path-of-idle-stats.scanner.auto', String(this.scannerAutoEnabled()));
+  }
+  private async initializeScannerServerState() {
+    try {
+      const response = await fetch('/api/scanner/state');
+      if (!response.ok) throw new Error('The backend could not load Scanner settings.');
+      const stored = await response.json();
+      if (stored?.exists && stored?.state) {
+        this.applyScannerPersistedState(stored.state);
+      } else {
+        const importResponse = await fetch('/api/scanner/state/import', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(this.currentScannerPersistedState())
+        });
+        if (!importResponse.ok) throw new Error('The backend could not import existing Scanner settings.');
+        const imported = await importResponse.json();
+        if (!imported?.state) throw new Error('The backend returned no Scanner settings after import.');
+        this.applyScannerPersistedState(imported.state);
+      }
+      this.scannerPersistenceReady.set(true);
+      this.scannerPersistenceError.set(null);
+    } catch (error) {
+      this.scannerPersistenceError.set(error instanceof Error ? error.message : 'Scanner settings remain available locally, but server persistence is unavailable.');
+    }
+  }
+  private scheduleScannerServerSave() {
+    this.scannerPersistenceDirty = true;
+    if (!this.scannerPersistenceReady() || this.destroyed) return;
+    if (this.scannerPersistenceTimer) window.clearTimeout(this.scannerPersistenceTimer);
+    this.scannerPersistenceTimer = window.setTimeout(() => {
+      this.scannerPersistenceTimer = undefined;
+      void this.flushScannerServerState();
+    }, 150);
+  }
+  private async flushScannerServerState() {
+    if (this.scannerPersistenceSaving || !this.scannerPersistenceReady() || this.destroyed) return;
+    this.scannerPersistenceSaving = true;
+    try {
+      while (this.scannerPersistenceDirty && !this.destroyed) {
+        this.scannerPersistenceDirty = false;
+        const response = await fetch('/api/scanner/state', {
+          method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(this.currentScannerPersistedState())
+        });
+        if (!response.ok) throw new Error('The backend could not save Scanner settings.');
+      }
+      this.scannerPersistenceError.set(null);
+    } catch (error) {
+      this.scannerPersistenceDirty = true;
+      this.scannerPersistenceError.set(error instanceof Error ? error.message : 'Scanner settings could not be saved to the server.');
+    } finally { this.scannerPersistenceSaving = false; }
+  }
   private normalizeScannerFilter(filter: ScannerFilter): ScannerFilter {
     const selectedCount = filter.statIds.length;
     const requested = Number(filter.minimumAttributeMatches);
@@ -1190,23 +1492,14 @@ class AppComponent implements OnInit, OnDestroy {
         this.selectedCodexRarity.set(storedCodexRarity);
       }
       this.codexAttributeSearch.set(window.localStorage.getItem('path-of-idle-stats.codex.attribute-search') || '');
-      this.scannerAutoEnabled.set(window.localStorage.getItem('path-of-idle-stats.scanner.auto') === 'true');
+      const storedScannerFilterGroups = JSON.parse(window.localStorage.getItem('path-of-idle-stats.scanner.filter-groups') || '[]');
       const storedScannerFilters = JSON.parse(window.localStorage.getItem('path-of-idle-stats.scanner.filters') || '[]');
-      if (Array.isArray(storedScannerFilters)) {
-        this.scannerFilters.set(storedScannerFilters.filter(filter => filter && typeof filter.id === 'string').map(filter => {
-          const statIds = Array.isArray(filter.statIds) ? filter.statIds.map(Number).filter(Number.isFinite) : [];
-          const storedMinimum = Number(filter.minimumAttributeMatches);
-          return this.normalizeScannerFilter({
-            id: filter.id,
-            title: typeof filter.title === 'string' ? filter.title.trim() : '',
-            enabled: filter.enabled !== false,
-            itemKeys: Array.isArray(filter.itemKeys) ? filter.itemKeys.map(String) : [],
-            anchorItemKey: typeof filter.anchorItemKey === 'string' ? filter.anchorItemKey : null,
-            statIds,
-            minimumAttributeMatches: Number.isFinite(storedMinimum) ? storedMinimum : Math.max(1, statIds.length)
-          });
-        }));
-      }
+      this.applyScannerPersistedState({
+        schemaVersion: 1,
+        filters: storedScannerFilters,
+        groups: storedScannerFilterGroups,
+        autoEnabled: window.localStorage.getItem('path-of-idle-stats.scanner.auto') === 'true'
+      });
       this.selectedAverageMapKeys.set(this.battleSlots.map(slot => this.normalizeAverageMapKey(window.localStorage.getItem(`path-of-idle-stats.battles.average-map.${slot}`))));
     } catch { /* localStorage can be unavailable in privacy-restricted contexts */ }
   }
@@ -1573,7 +1866,7 @@ class AppComponent implements OnInit, OnDestroy {
   @HostListener('document:click')
   closeMapSelector() { this.mapSelectorSlot.set(null); this.mapSearch.set(''); }
   @HostListener('document:keydown.escape')
-  closeMapSelectorOnEscape() { this.closeMapSelector(); }
+  closeMapSelectorOnEscape() { this.closeMapSelector(); this.cancelScannerFilterGroupDeletion(); }
   @HostListener('document:mouseleave')
   @HostListener('window:blur')
   hideTooltips() {

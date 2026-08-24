@@ -1,11 +1,14 @@
 import { createServer } from 'node:http';
 import { appendFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname, extname, join, normalize } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const dataDirectory = join(root, 'data');
 const eventLog = join(dataDirectory, 'events.jsonl');
+const scannerDatabasePath = join(dataDirectory, 'path-of-idle-stats.sqlite');
+const scannerBackupDirectory = join(dataDirectory, 'scanner-state-backups');
 const webRoot = join(root, 'dist', 'dashboard', 'browser');
 const iconRoot = join(root, 'data', 'icons');
 const snapshotRequest = 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\PathOfIdle\\BepInEx\\PathOfIdleStats\\snapshot.request';
@@ -17,6 +20,49 @@ const state = { connected: false, gameRunning: false, updatedAt: null, snapshotU
 let codexSnapshot = { updatedAt: null, items: [], affixPools: [], rarities: [] };
 let lastGameHeartbeat = 0;
 await mkdir(dataDirectory, { recursive: true });
+const scannerDatabase = new DatabaseSync(scannerDatabasePath);
+scannerDatabase.exec(`
+  PRAGMA journal_mode = WAL;
+  PRAGMA synchronous = FULL;
+  CREATE TABLE IF NOT EXISTS scanner_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    state_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+`);
+const readScannerStateStatement = scannerDatabase.prepare('SELECT state_json, updated_at FROM scanner_state WHERE id = 1');
+const writeScannerStateStatement = scannerDatabase.prepare(`
+  INSERT INTO scanner_state (id, state_json, updated_at) VALUES (1, ?, ?)
+  ON CONFLICT(id) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at
+`);
+
+function readScannerState() {
+  const row = readScannerStateStatement.get();
+  if (!row) return null;
+  return { state: JSON.parse(row.state_json), updatedAt: row.updated_at };
+}
+
+function validateScannerState(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Scanner state must be a JSON object.');
+  if (!Array.isArray(value.filters) || !Array.isArray(value.groups)) throw new Error('Scanner state requires filters and groups arrays.');
+  if (value.filters.some(filter => !filter || typeof filter !== 'object' || typeof filter.id !== 'string')) throw new Error('Every scanner filter requires a string id.');
+  if (value.groups.some(group => !group || typeof group !== 'object' || typeof group.id !== 'string')) throw new Error('Every scanner group requires a string id.');
+  return { ...value, schemaVersion: Number(value.schemaVersion) || 1, autoEnabled: value.autoEnabled === true };
+}
+
+async function persistScannerState(value, onlyIfEmpty = false) {
+  const normalizedState = validateScannerState(value);
+  const existing = readScannerState();
+  if (onlyIfEmpty && existing) return { imported: false, ...existing };
+  if (!existing) {
+    await mkdir(scannerBackupDirectory, { recursive: true });
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    await writeFile(join(scannerBackupDirectory, `initial-browser-import-${timestamp}.json`), JSON.stringify(normalizedState, null, 2), 'utf8');
+  }
+  const updatedAt = new Date().toISOString();
+  writeScannerStateStatement.run(JSON.stringify(normalizedState), updatedAt);
+  return { imported: !existing, state: normalizedState, updatedAt };
+}
 
 function applyEvent(event) {
   state.connected = true;
@@ -96,6 +142,17 @@ const server = createServer(async (request, response) => {
     if (request.method === 'GET' && url.pathname === '/api/state') return json(response, 200, publicState());
     if (request.method === 'GET' && url.pathname === '/api/catalogs') return json(response, 200, state.catalogs);
     if (request.method === 'GET' && url.pathname === '/api/codex') return json(response, 200, codexSnapshot);
+    if (request.method === 'GET' && url.pathname === '/api/scanner/state') {
+      const stored = readScannerState();
+      return json(response, 200, stored ? { exists: true, ...stored } : { exists: false, state: null, updatedAt: null });
+    }
+    if (request.method === 'POST' && url.pathname === '/api/scanner/state/import') {
+      const result = await persistScannerState(JSON.parse(await readBody(request)), true);
+      return json(response, result.imported ? 201 : 200, result);
+    }
+    if (request.method === 'PUT' && url.pathname === '/api/scanner/state') {
+      return json(response, 200, await persistScannerState(JSON.parse(await readBody(request))));
+    }
     if (request.method === 'POST' && url.pathname === '/api/catalogs/refresh') {
       await mkdir(dirname(catalogRequest), { recursive: true });
       await writeFile(catalogRequest, new Date().toISOString(), 'utf8');

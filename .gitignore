@@ -18,6 +18,10 @@ work/
 
 # Runtime telemetry and game-derived assets/catalogs
 data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
 
 # Machine-specific installation record
 install-manifest.json
