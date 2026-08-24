@@ -10,8 +10,10 @@ const webRoot = join(root, 'dist', 'dashboard', 'browser');
 const iconRoot = join(root, 'data', 'icons');
 const snapshotRequest = 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\PathOfIdle\\BepInEx\\PathOfIdleStats\\snapshot.request';
 const catalogRequest = 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\PathOfIdle\\BepInEx\\PathOfIdleStats\\catalog.request';
+const codexRequest = 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\PathOfIdle\\BepInEx\\PathOfIdleStats\\codex.request';
 const clients = new Set();
 const state = { connected: false, gameRunning: false, updatedAt: null, snapshotUpdatedAt: null, heroes: [], slots: [], resources: [], sanctum: null, inventory: [], battles: [], events: [], catalogs: {} };
+let codexSnapshot = { updatedAt: null, items: [], affixPools: [], rarities: [] };
 let lastGameHeartbeat = 0;
 await mkdir(dataDirectory, { recursive: true });
 
@@ -34,6 +36,7 @@ function applyEvent(event) {
     state.sanctum = event.payload?.sanctum ?? state.sanctum;
   }
   if (event.type === 'snapshot.inventory') state.inventory = event.payload?.items ?? event.payload ?? [];
+  if (event.type === 'snapshot.codex') codexSnapshot = { updatedAt: event.timestamp, ...(event.payload ?? {}) };
   if (event.type.startsWith('catalog.')) state.catalogs[event.type.slice(8)] = event.payload?.entries ?? [];
   if (event.type === 'battle.ended') {
     state.resources = event.payload?.resources ?? state.resources;
@@ -74,7 +77,7 @@ async function readBody(request) {
   let length = 0;
   for await (const chunk of request) {
     length += chunk.length;
-    if (length > 1_000_000) throw new Error('Event body exceeds 1 MB');
+    if (length > 10_000_000) throw new Error('Event body exceeds 10 MB');
     chunks.push(chunk);
   }
   return Buffer.concat(chunks).toString('utf8');
@@ -87,9 +90,15 @@ const server = createServer(async (request, response) => {
     if (request.method === 'GET' && url.pathname === '/api/health') return json(response, 200, { ok: true, updatedAt: state.updatedAt });
     if (request.method === 'GET' && url.pathname === '/api/state') return json(response, 200, publicState());
     if (request.method === 'GET' && url.pathname === '/api/catalogs') return json(response, 200, state.catalogs);
+    if (request.method === 'GET' && url.pathname === '/api/codex') return json(response, 200, codexSnapshot);
     if (request.method === 'POST' && url.pathname === '/api/catalogs/refresh') {
       await mkdir(dirname(catalogRequest), { recursive: true });
       await writeFile(catalogRequest, new Date().toISOString(), 'utf8');
+      return json(response, 202, { requested: true });
+    }
+    if (request.method === 'POST' && url.pathname === '/api/codex/refresh') {
+      await mkdir(dirname(codexRequest), { recursive: true });
+      await writeFile(codexRequest, new Date().toISOString(), 'utf8');
       return json(response, 202, { requested: true });
     }
     if (request.method === 'POST' && url.pathname === '/api/snapshot') {

@@ -6,7 +6,7 @@ Local-only telemetry, data-mining, and dashboard tooling for **Path of Idle: Old
 
 A BepInEx 6 IL2CPP plugin observes the running Unity game and POSTs JSON telemetry to a local Node.js service. An Angular/Tailwind dashboard at `http://127.0.0.1:43127/` displays the three concurrent battle slots, ordered heroes, battle history, loot, classes, levels, talent trees, skills, English names, icons, and the selected basic skill.
 
-The implementation is read-only with respect to game state. It does not locate, read, edit, or replace save files.
+Telemetry extraction is read-only with respect to game state. The optional guarded restart script uses the game's real Continue button and visible Auto checkboxes to resume the three battle slots; it never locates, reads, edits, or replaces save files.
 
 ## Safety boundaries
 
@@ -29,6 +29,8 @@ The implementation is read-only with respect to game state. It does not locate, 
 - `scripts/build-plugin.ps1` — Roslyn compilation against BepInEx and game interop.
 - `scripts/install.ps1` — guarded first installation.
 - `scripts/update-plugin.ps1` — guarded plugin-only replacement.
+- `scripts/configure-bepinex.ps1` — disables only BepInEx console output while preserving disk logs.
+- `scripts/restart-game-and-update.ps1` — normal-close/update/reopen workflow with verified window placement, Continue, and three-slot Auto UI clicks.
 - `scripts/uninstall.ps1` — manifest-limited removal/restoration.
 - `scripts/extract-icons.py` — game sprite extraction to content-addressed PNGs.
 - `data/` — runtime JSONL, catalogs, and icons; ignored.

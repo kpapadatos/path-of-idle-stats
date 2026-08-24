@@ -111,8 +111,14 @@ If an extra folder level appears between `bepinex` and `BepInEx`, move the archi
 4. Open the Path of Idle game folder.
 5. Paste the files beside `PathOfIdle.exe`.
 6. Start the game normally through Steam.
-7. Wait until the main menu appears. A small BepInEx console window may also appear; this is expected.
+7. Wait until the main menu appears. A small BepInEx console window may appear during this first bootstrap launch.
 8. Close the game normally.
+9. Disable that console for future launches while retaining file logs:
+
+```powershell
+Set-Location 'C:\r\path-of-idle-stats'
+.\scripts\configure-bepinex.ps1
+```
 
 This first launch creates the game-specific support files needed to build the Stats plugin. Confirm this folder now exists:
 

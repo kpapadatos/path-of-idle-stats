@@ -8,6 +8,7 @@ $ProjectDirectory = Split-Path -Parent $PSScriptRoot
 $StagingDirectory = Join-Path $ProjectDirectory 'work\bepinex'
 $PluginPath = Join-Path $ProjectDirectory 'plugin\bin\Release\net6.0\PathOfIdleStats.dll'
 $ManifestPath = Join-Path $ProjectDirectory 'install-manifest.json'
+$ConfigureBepInExScript = Join-Path $PSScriptRoot 'configure-bepinex.ps1'
 
 if (Get-Process -Name PathOfIdle -ErrorAction SilentlyContinue) {
     throw 'Path of Idle is running. Close it normally before installing.'
@@ -56,5 +57,10 @@ Install-File $PluginPath 'BepInEx\plugins\PathOfIdleStats.dll'
     replaced = @($replaced)
 } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $ManifestPath -Encoding utf8
 
-Write-Host 'BepInEx and PathOfIdleStats installed. Start the game normally through Steam.'
+if (Test-Path -LiteralPath (Join-Path $GameDirectory 'BepInEx\config\BepInEx.cfg')) {
+    & $ConfigureBepInExScript -GameDirectory $GameDirectory
+} else {
+    Write-Warning 'BepInEx.cfg has not been generated yet. Its console can be disabled after the first normal game launch.'
+}
 
+Write-Host 'BepInEx and PathOfIdleStats installed. Start the game normally through Steam.'

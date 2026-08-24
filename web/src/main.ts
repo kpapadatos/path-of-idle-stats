@@ -1,10 +1,12 @@
 import 'zone.js';
 import { CommonModule } from '@angular/common';
-import { ChangeDetectionStrategy, Component, computed, HostListener, NgZone, OnDestroy, OnInit, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, ElementRef, HostListener, NgZone, OnDestroy, OnInit, signal, ViewChild } from '@angular/core';
 import { bootstrapApplication } from '@angular/platform-browser';
 
 type TelemetryEvent = { type: string; timestamp?: string; payload?: unknown } & Record<string, unknown>;
 type CombatTimelineEntry = { id: number; capturedAt: number; stats: any[]; effects: any[] };
+type CodexRarityKey = 'rare' | 'legendary' | 'set' | 'unique' | 'mythic';
+type CodexSnapshot = { updatedAt: string | null; items: any[]; affixPools: Array<{ id: number; stats: any[] }>; rarities: any[] };
 type TelemetryState = {
   connected: boolean;
   gameRunning: boolean;
@@ -26,8 +28,8 @@ type TelemetryState = {
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [CommonModule],
   template: `
-    <main class="mx-auto max-w-7xl p-3 md:p-5">
-      <header class="mb-4 flex flex-wrap items-end justify-between gap-3">
+    <main class="mx-auto flex h-dvh max-w-7xl flex-col overflow-hidden p-3 md:p-5">
+      <header class="mb-4 flex shrink-0 flex-wrap items-end justify-between gap-3">
         <div>
           <h1 class="text-3xl font-semibold tracking-tight">Path of Idle Stats</h1>
         </div>
@@ -42,7 +44,7 @@ type TelemetryState = {
         </div>
       </header>
 
-      <section class="mb-3 grid grid-cols-4 gap-2" aria-label="Primary resources and Sanctum">
+      <section class="mb-3 grid shrink-0 grid-cols-4 gap-2" aria-label="Primary resources and Sanctum">
         <article *ngFor="let resource of primaryResources(); trackBy: trackResource" [attr.aria-label]="resourceTitle($any(resource)) + ': ' + resourceCount($any(resource))" class="flex items-center justify-center gap-2 rounded-xl border border-zinc-800 bg-zinc-900/80 px-3 py-2">
           <img *ngIf="$any(resource).iconUrl" [src]="$any(resource).iconUrl" class="h-7 w-7 object-contain" alt="">
           <p class="font-mono text-sm font-semibold text-zinc-100">{{ resourceCount($any(resource)) }}</p>
@@ -52,11 +54,13 @@ type TelemetryState = {
         </article>
       </section>
 
-      <nav class="mb-3 flex gap-1 border-b border-zinc-800" role="tablist" aria-label="Dashboard sections">
+      <nav class="mb-3 flex shrink-0 gap-1 border-b border-zinc-800" role="tablist" aria-label="Dashboard sections">
         <button type="button" role="tab" (click)="selectPageTab('battles')" [attr.aria-selected]="selectedPageTab() === 'battles'" class="border-b-2 px-4 py-2 text-sm font-medium" [class]="selectedPageTab() === 'battles' ? 'border-amber-400 text-amber-300' : 'border-transparent text-zinc-500 hover:text-zinc-300'">Battles</button>
-        <button type="button" role="tab" (click)="selectPageTab('compendium')" [attr.aria-selected]="selectedPageTab() === 'compendium'" class="border-b-2 px-4 py-2 text-sm font-medium" [class]="selectedPageTab() === 'compendium' ? 'border-amber-400 text-amber-300' : 'border-transparent text-zinc-500 hover:text-zinc-300'">Compendium</button>
+        <button type="button" role="tab" (click)="selectPageTab('compendium')" [attr.aria-selected]="selectedPageTab() === 'compendium'" class="border-b-2 px-4 py-2 text-sm font-medium" [class]="selectedPageTab() === 'compendium' ? 'border-amber-400 text-amber-300' : 'border-transparent text-zinc-500 hover:text-zinc-300'">Talents</button>
+        <button type="button" role="tab" (click)="selectPageTab('codex')" [attr.aria-selected]="selectedPageTab() === 'codex'" class="border-b-2 px-4 py-2 text-sm font-medium" [class]="selectedPageTab() === 'codex' ? 'border-amber-400 text-amber-300' : 'border-transparent text-zinc-500 hover:text-zinc-300'">Codex</button>
       </nav>
 
+      <div #pageTabBody class="page-tab-body min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1 pb-3">
       <ng-container *ngIf="selectedPageTab() === 'battles'">
 
       <section class="space-y-3">
@@ -172,6 +176,66 @@ type TelemetryState = {
         </ng-template>
         <ng-template #noCompendiumTalents><p class="rounded-xl border border-zinc-800 bg-zinc-950 py-12 text-center text-sm text-zinc-600">No talents match this search.</p></ng-template>
       </section>
+
+      <section *ngIf="selectedPageTab() === 'codex'" aria-label="Item Codex">
+        <div class="mb-3 flex items-center justify-between gap-3">
+          <div>
+            <h2 class="font-semibold text-zinc-100">Item Codex</h2>
+            <p class="text-xs text-zinc-500">Awareness and possible Rank 9 attributes from the current game state.</p>
+          </div>
+          <button type="button" (click)="refreshCodex()" [disabled]="codexLoading() || !state().gameRunning" class="rounded-lg border border-amber-700 bg-amber-950/30 px-3 py-2 text-sm font-medium text-amber-300 hover:bg-amber-950/60 disabled:cursor-not-allowed disabled:opacity-40">Refresh</button>
+        </div>
+        <div class="grid grid-cols-[10rem_minmax(0,1fr)] gap-4">
+          <nav class="space-y-1 rounded-xl border border-zinc-800 bg-zinc-950 p-2" aria-label="Codex rarity">
+            <button type="button" *ngFor="let rarity of codexRarities" (click)="selectCodexRarity(rarity.key)" [attr.aria-pressed]="selectedCodexRarity() === rarity.key" [class]="selectedCodexRarity() === rarity.key ? 'flex w-full items-center justify-between rounded-lg bg-amber-950/50 px-3 py-2 text-left text-sm font-semibold text-amber-300' : 'flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'">
+              <span>{{ rarity.label }}</span><span class="text-xs opacity-50">{{ codexRarityCount(rarity.key) }}</span>
+            </button>
+          </nav>
+          <div class="min-w-0 rounded-xl border border-zinc-800 bg-zinc-950 p-3">
+            <p *ngIf="codexLoading() && !codexSnapshot().items.length" class="py-16 text-center text-sm text-zinc-500">Reading the Codex from the game…</p>
+            <p *ngIf="codexError()" class="mb-3 rounded-lg border border-rose-900 bg-rose-950/30 px-3 py-2 text-sm text-rose-300">{{ codexError() }}</p>
+            <div *ngIf="codexItems().length" class="overflow-x-auto">
+              <div class="grid min-w-[720px] grid-cols-10 gap-2">
+                <button type="button" *ngFor="let item of codexItems(); trackBy: trackCodexItem" (click)="openCodexItem(item)" [attr.title]="$any(item).englishName || $any(item).name" [attr.aria-label]="codexItemAriaLabel(item)" class="group relative aspect-square rounded-lg border border-zinc-700 bg-zinc-900 p-1.5 transition hover:border-amber-500 hover:bg-zinc-800">
+                  <img *ngIf="$any(item).iconUrl" [src]="$any(item).iconUrl" class="h-full w-full object-contain" alt="">
+                  <span class="absolute bottom-1 right-1 rounded bg-black/85 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-amber-300">{{ $any(item).awarenessLevel ?? 0 }}</span>
+                </button>
+              </div>
+            </div>
+            <p *ngIf="!codexLoading() && !codexItems().length && !codexError()" class="py-16 text-center text-sm text-zinc-600">No {{ selectedCodexRarityLabel() }} Codex items were returned by the game.</p>
+          </div>
+        </div>
+      </section>
+      </div>
+
+      <div *ngIf="selectedCodexItem() as item" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" (click)="closeCodexItem()">
+        <section role="dialog" aria-modal="true" [attr.aria-label]="($any(item).englishName || $any(item).name || 'Codex item') + ' possible attributes'" class="flex max-h-[88vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-zinc-700 bg-zinc-950 shadow-2xl" (click)="$event.stopPropagation()">
+          <header class="flex shrink-0 items-start justify-between gap-4 border-b border-zinc-800 p-5">
+            <div class="flex min-w-0 items-center gap-3">
+              <div class="h-16 w-16 shrink-0 rounded-xl border border-zinc-700 bg-zinc-900 p-2"><img *ngIf="$any(item).iconUrl" [src]="$any(item).iconUrl" class="h-full w-full object-contain" alt=""></div>
+              <div class="min-w-0">
+                <h2 class="truncate text-xl font-semibold text-zinc-100">{{ $any(item).englishName || $any(item).name || 'Unknown item' }}</h2>
+                <p class="mt-1 text-sm text-amber-300">{{ $any(item).rarityLabel }} · {{ $any(item).partName || 'Equipment' }}<span *ngIf="$any(item).partName === 'Weapon' && $any(item).subtypeName"> · {{ $any(item).subtypeName }}</span></p>
+                <p class="mt-1 text-xs text-zinc-500">Codex awareness {{ $any(item).awarenessLevel ?? 0 }}</p>
+              </div>
+            </div>
+            <button type="button" (click)="closeCodexItem()" class="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-400 hover:bg-zinc-800 hover:text-white">Close</button>
+          </header>
+          <div class="shrink-0 border-b border-zinc-800 px-5 py-3">
+            <input #codexAttributeSearchInput type="search" aria-label="Search possible attributes" placeholder="Search attributes…" [value]="codexAttributeSearch()" (input)="setCodexAttributeSearch($event)" class="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-amber-500" />
+          </div>
+          <div class="min-h-0 flex-1 overflow-y-auto p-5">
+            <div *ngIf="filteredCodexStats().length; else noCodexStats" class="space-y-2">
+              <div *ngFor="let stat of filteredCodexStats(); trackBy: trackCodexStat" [class]="isCodexStatExcluded(item, stat) ? 'flex items-center gap-3 rounded-lg border border-rose-800 bg-rose-950/50 px-3 py-2.5' : 'flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900/70 px-3 py-2.5'">
+                <span class="shrink-0 rounded bg-zinc-950 px-2 py-1 font-mono text-[10px] text-zinc-500">9</span>
+                <p class="min-w-0 flex-1 whitespace-pre-line text-sm text-zinc-200">{{ codexStatText(stat) }}</p>
+                <span *ngIf="isCodexStatExcluded(item, stat)" class="shrink-0 text-xs font-semibold uppercase tracking-wide text-rose-300">Excluded</span>
+              </div>
+            </div>
+            <ng-template #noCodexStats><p class="py-10 text-center text-sm text-zinc-600">{{ selectedCodexStats().length ? 'No attributes match this search.' : 'The game returned no possible attributes for this item.' }}</p></ng-template>
+          </div>
+        </section>
+      </div>
 
       <div *ngIf="selectedHero() as hero" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" (click)="closeHero()">
         <section role="dialog" aria-modal="true" [attr.aria-label]="($any(hero).name || 'Hero') + ' details'" class="flex h-[92vh] max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-zinc-700 bg-zinc-950 p-5 shadow-2xl" (click)="$event.stopPropagation()">
@@ -312,12 +376,34 @@ type TelemetryState = {
   `
 })
 class AppComponent implements OnInit, OnDestroy {
+  @ViewChild('pageTabBody') private pageTabBody?: ElementRef<HTMLElement>;
+
+  @ViewChild('codexAttributeSearchInput')
+  set codexAttributeSearchElement(element: ElementRef<HTMLInputElement> | undefined) {
+    if (!element) return;
+    element.nativeElement.focus({ preventScroll: true });
+    element.nativeElement.select();
+  }
+
   readonly battleSlots = [0, 1, 2];
   readonly heroPositions = [0, 1, 2];
-  readonly selectedPageTab = signal<'battles' | 'compendium'>('battles');
+  readonly codexRarities: Array<{ key: CodexRarityKey; label: string; quality: number }> = [
+    { key: 'rare', label: 'Rare', quality: 3 },
+    { key: 'legendary', label: 'Legendary', quality: 4 },
+    { key: 'set', label: 'Set', quality: 6 },
+    { key: 'unique', label: 'Unique', quality: 8 },
+    { key: 'mythic', label: 'Mythic', quality: 5 }
+  ];
+  readonly selectedPageTab = signal<'battles' | 'compendium' | 'codex'>('battles');
   readonly talentSearch = signal('');
   readonly compendiumRank = signal(1);
   readonly selectedCompendiumTalentIds = signal<ReadonlySet<number>>(new Set<number>());
+  readonly codexSnapshot = signal<CodexSnapshot>({ updatedAt: null, items: [], affixPools: [], rarities: [] });
+  readonly selectedCodexRarity = signal<CodexRarityKey>('rare');
+  readonly selectedCodexItem = signal<any | null>(null);
+  readonly codexAttributeSearch = signal('');
+  readonly codexLoading = signal(false);
+  readonly codexError = signal<string | null>(null);
   readonly catalogs = signal<Record<string, any[]>>({});
   readonly selectedHero = signal<any | null>(null);
   readonly selectedHeroTab = signal<'talents' | 'stats'>('talents');
@@ -356,6 +442,21 @@ class AppComponent implements OnInit, OnDestroy {
   readonly selectedCompendiumTalents = computed<any[]>(() => {
     const selectedIds = this.selectedCompendiumTalentIds();
     return this.compendiumTalentEntries().filter((talent: any) => selectedIds.has(Number(talent?.id)));
+  });
+  readonly codexItems = computed<any[]>(() => this.codexSnapshot().items
+    .filter((item: any) => item?.rarity === this.selectedCodexRarity())
+    .sort((left: any, right: any) => Number(left?.part) - Number(right?.part)
+      || Number(left?.subtype) - Number(right?.subtype)
+      || Number(left?.sortIndex) - Number(right?.sortIndex)
+      || Number(left?.id) - Number(right?.id)));
+  readonly selectedCodexStats = computed<any[]>(() => {
+    const item = this.selectedCodexItem();
+    if (!item) return [];
+    return this.codexSnapshot().affixPools.find(pool => Number(pool?.id) === Number(item?.affixPoolId))?.stats || [];
+  });
+  readonly filteredCodexStats = computed<any[]>(() => {
+    const search = this.codexAttributeSearch().trim().toLocaleLowerCase('en-US');
+    return this.selectedCodexStats().filter(stat => !search || `${this.codexStatText(stat)} ${stat?.qualityName || ''}`.toLocaleLowerCase('en-US').includes(search));
   });
   readonly combatEffects = computed<any[]>(() => {
     const selected = this.selectedTimelineEntry();
@@ -450,7 +551,14 @@ class AppComponent implements OnInit, OnDestroy {
     if (this.tooltipFrame) cancelAnimationFrame(this.tooltipFrame);
     if (this.tooltipValidationFrame) cancelAnimationFrame(this.tooltipValidationFrame);
   }
-  selectPageTab(tab: 'battles' | 'compendium') { this.hideTooltips(); this.selectedPageTab.set(tab); }
+  selectPageTab(tab: 'battles' | 'compendium' | 'codex') {
+    const currentTab = this.selectedPageTab();
+    const enteringCodex = tab === 'codex' && currentTab !== 'codex';
+    this.hideTooltips();
+    this.selectedPageTab.set(tab);
+    if (tab !== currentTab && this.pageTabBody) this.pageTabBody.nativeElement.scrollTop = 0;
+    if (enteringCodex) void this.refreshCodex();
+  }
   setTalentSearch(event: Event) { this.talentSearch.set((event.target as HTMLInputElement).value); }
   setCompendiumRank(event: Event) {
     const value = (event.target as HTMLInputElement).valueAsNumber;
@@ -467,6 +575,71 @@ class AppComponent implements OnInit, OnDestroy {
     this.writeLocalStorage('path-of-idle-stats.compendium.selected-talents', JSON.stringify([...selected]));
   }
   trackCompendiumTalent(_index: number, talent: any): number { return Number(talent?.id); }
+  selectCodexRarity(rarity: CodexRarityKey) {
+    this.selectedCodexRarity.set(rarity);
+    this.writeLocalStorage('path-of-idle-stats.codex.rarity', rarity);
+  }
+  setCodexAttributeSearch(event: Event) {
+    const value = (event.target as HTMLInputElement).value;
+    this.codexAttributeSearch.set(value);
+    this.writeLocalStorage('path-of-idle-stats.codex.attribute-search', value);
+  }
+  selectedCodexRarityLabel(): string { return this.codexRarities.find(rarity => rarity.key === this.selectedCodexRarity())?.label || 'selected'; }
+  codexRarityCount(rarity: CodexRarityKey): number { return this.codexSnapshot().items.filter((item: any) => item?.rarity === rarity).length; }
+  trackCodexItem(_index: number, item: any): string { return String(item?.key ?? `${item?.rarity}:${item?.id}`); }
+  trackCodexStat(_index: number, stat: any): number { return Number(stat?.id); }
+  codexItemAriaLabel(item: any): string {
+    return `${item?.englishName || item?.name || 'Unknown item'}, awareness ${item?.awarenessLevel ?? 0}`;
+  }
+  openCodexItem(item: any) { this.selectedCodexItem.set(item); this.hideTooltips(); }
+  closeCodexItem() { this.selectedCodexItem.set(null); }
+  isCodexStatExcluded(item: any, stat: any): boolean {
+    return Array.isArray(item?.excludedAffixIds) && item.excludedAffixIds.map(Number).includes(Number(stat?.id));
+  }
+  codexStatText(stat: any): string {
+    const display = this.plainGameText(stat?.displayDescription || '').replace(/~/g, '-');
+    if (display) return display;
+    const range = this.plainGameText(stat?.rank9Range || '');
+    const english = this.plainGameText(stat?.englishDescription || stat?.displayDescription || stat?.description || 'Unknown attribute');
+    if (!range) return english;
+    if (/[A-Za-z]/.test(range)) return range;
+    if (/\{[^}]+\}/.test(english)) return english.replace(/\{[^}]+\}/, range.replace(/~/g, '-')).replace(/\s*\{[^}]+\}/g, '');
+    return `${english} ${range.replace(/~/g, '-')}`.trim();
+  }
+  async refreshCodex() {
+    if (this.codexLoading()) return;
+    if (!this.state().gameRunning) { this.codexError.set('Start the game and enter your save before refreshing the Codex.'); return; }
+    this.codexLoading.set(true);
+    this.codexError.set(null);
+    const previousTimestamp = this.codexSnapshot().updatedAt;
+    try {
+      const response = await fetch('/api/codex/refresh', { method: 'POST' });
+      if (!response.ok) throw new Error('The backend rejected the Codex request.');
+      for (let attempt = 0; attempt < 80 && !this.destroyed; attempt++) {
+        await new Promise(resolve => window.setTimeout(resolve, 500));
+        const snapshot = await fetch('/api/codex').then(result => {
+          if (!result.ok) throw new Error('The backend could not return the Codex snapshot.');
+          return result.json();
+        }) as CodexSnapshot;
+        if (!snapshot?.updatedAt || snapshot.updatedAt === previousTimestamp) continue;
+        const normalized: CodexSnapshot = {
+          updatedAt: snapshot.updatedAt,
+          items: Array.isArray(snapshot.items) ? snapshot.items : [],
+          affixPools: Array.isArray(snapshot.affixPools) ? snapshot.affixPools : [],
+          rarities: Array.isArray(snapshot.rarities) ? snapshot.rarities : []
+        };
+        this.codexSnapshot.set(normalized);
+        const selectedKey = this.selectedCodexItem()?.key;
+        if (selectedKey) this.selectedCodexItem.set(normalized.items.find((item: any) => item?.key === selectedKey) || null);
+        return;
+      }
+      throw new Error('The game did not return a Codex snapshot in time.');
+    } catch (error) {
+      this.codexError.set(error instanceof Error ? error.message : 'Codex refresh failed.');
+    } finally {
+      this.codexLoading.set(false);
+    }
+  }
   private updateCompendiumRank(value: number) {
     const rank = this.clampCompendiumRank(value);
     this.compendiumRank.set(rank);
@@ -480,6 +653,11 @@ class AppComponent implements OnInit, OnDestroy {
       if (Array.isArray(storedTalents)) {
         this.selectedCompendiumTalentIds.set(new Set(storedTalents.map(Number).filter(Number.isFinite)));
       }
+      const storedCodexRarity = window.localStorage.getItem('path-of-idle-stats.codex.rarity') as CodexRarityKey | null;
+      if (storedCodexRarity && this.codexRarities.some(rarity => rarity.key === storedCodexRarity)) {
+        this.selectedCodexRarity.set(storedCodexRarity);
+      }
+      this.codexAttributeSearch.set(window.localStorage.getItem('path-of-idle-stats.codex.attribute-search') || '');
     } catch { /* localStorage can be unavailable in privacy-restricted contexts */ }
   }
   private writeLocalStorage(key: string, value: string) {

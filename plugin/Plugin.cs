@@ -23,7 +23,7 @@ public sealed class Plugin : BasePlugin
 {
     public const string PluginGuid = "local.pathofidle.stats";
     public const string PluginName = "Path of Idle Stats";
-    public const string PluginVersion = "0.5.3";
+    public const string PluginVersion = "0.6.10";
 
     private static Plugin? Instance;
     private static readonly object StateLock = new();
@@ -35,6 +35,9 @@ public sealed class Plugin : BasePlugin
     private static bool catalogSent;
     private static float nextSnapshotRequestCheck;
     private static float nextHeartbeat;
+    private static string? lastAutoUiStatus;
+    private static string? stableAutoUiSignature;
+    private static float stableAutoUiSince;
     private Harmony? harmony;
     private TelemetryWriter? writer;
     private static Assembly? gameAssembly;
@@ -69,6 +72,13 @@ public sealed class Plugin : BasePlugin
         if (now < nextSnapshotRequestCheck) return;
         nextSnapshotRequestCheck = now + 0.25f;
         var telemetryDirectory = Path.Combine(Paths.BepInExRootPath, "PathOfIdleStats");
+        var continueRequestPath = Path.Combine(telemetryDirectory, "continue.request");
+        if (File.Exists(continueRequestPath) && TryClickContinueGame(telemetryDirectory))
+        {
+            File.Delete(continueRequestPath);
+            Instance?.Log.LogInfo("Invoked MainScene.OnContinueBtnClick as requested by the restart script.");
+        }
+
         var catalogRequestPath = Path.Combine(telemetryDirectory, "catalog.request");
         if (File.Exists(catalogRequestPath))
         {
@@ -83,7 +93,236 @@ public sealed class Plugin : BasePlugin
             File.Delete(snapshotRequestPath);
             EmitLiveSlotSnapshot();
         }
+
+        var codexRequestPath = Path.Combine(telemetryDirectory, "codex.request");
+        if (File.Exists(codexRequestPath) && IsSaveDataReady())
+        {
+            File.Delete(codexRequestPath);
+            EmitCodexSnapshot();
+        }
+
+        var autoRequestPath = Path.Combine(telemetryDirectory, "auto.request");
+        if (File.Exists(autoRequestPath) && IsSaveDataReady())
+        {
+            var complete = TryEnableAllBattleSlotsFromUi(out var status);
+            if (!string.Equals(status, lastAutoUiStatus, StringComparison.Ordinal))
+            {
+                lastAutoUiStatus = status;
+                Instance?.Log.LogInfo($"Auto UI status: {status}");
+            }
+            if (complete)
+            {
+                File.Delete(autoRequestPath);
+                File.WriteAllText(Path.Combine(telemetryDirectory, "auto.complete"), DateTimeOffset.Now.ToString("O"));
+                Instance?.Log.LogInfo("All three visible battle-slot Auto toggles are on and all three battles are running.");
+            }
+        }
     });
+
+    private static bool TryEnableAllBattleSlotsFromUi(out string status)
+    {
+        // Each battle slot has a separate Auto Toggle for its prepare, fight, and
+        // end UI states. Select the one control that is currently visible and
+        // interactable in each slot. Do not write SaveAdvFieldData or call
+        // AdvFieldData.SetAuto here.
+        var advModType = GameType("AdvMod");
+        if (advModType is null)
+        {
+            status = "AdvMod type unavailable";
+            return false;
+        }
+        var advMods = FindActiveSceneObjects(advModType).ToList();
+        if (advMods.Count != 1)
+        {
+            status = $"active AdvMod count={advMods.Count}, expected=1";
+            return false;
+        }
+
+        var fieldCells = ReadList(Read(advMods[0], "advFieldList")).ToList();
+        if (fieldCells.Count != 3)
+        {
+            status = $"field-cell count={fieldCells.Count}, expected=3";
+            return false;
+        }
+        var selectedMods = new List<object>();
+        var toggles = new List<object>();
+        var selectedNames = new List<string>();
+        var autoModProperties = new[] { "advPrepareMod", "advFightMod", "advEndMod" };
+        for (var slotIndex = 0; slotIndex < fieldCells.Count; slotIndex++)
+        {
+            var candidates = autoModProperties.Select(property =>
+                (Name: property, Mod: Read(fieldCells[slotIndex], property)))
+                .Where(candidate => candidate.Mod is not null)
+                .Select(candidate => (candidate.Name, Mod: candidate.Mod!, Toggle: Read(candidate.Mod, "autoToggle")))
+                .Where(candidate => candidate.Toggle is not null
+                    && Convert.ToBoolean(Read(Read(candidate.Toggle, "gameObject"), "activeInHierarchy") ?? false, CultureInfo.InvariantCulture)
+                    && Convert.ToBoolean(Read(candidate.Toggle, "interactable") ?? false, CultureInfo.InvariantCulture))
+                .ToList();
+            if (candidates.Count != 1)
+            {
+                stableAutoUiSignature = null;
+                stableAutoUiSince = 0f;
+                status = $"slot {slotIndex + 1} active/interactable Auto-control count={candidates.Count}, expected=1";
+                return false;
+            }
+            selectedNames.Add(candidates[0].Name);
+            selectedMods.Add(candidates[0].Mod);
+            toggles.Add(candidates[0].Toggle!);
+        }
+
+        var dataMgr = ReadStatic("Game", "dataMgr");
+        var advData = Read(Read(dataMgr, "nowSeasonData"), "advData");
+        var dataFields = ReadList(Read(advData, "advFieldList")).Take(3).ToList();
+        if (dataFields.Count != 3)
+        {
+            status = $"live battle-field count={dataFields.Count}, expected=3";
+            return false;
+        }
+        var uiFieldPointers = selectedMods.Select(mod => NativePointer(Read(mod, "advFieldData")!)).OrderBy(value => value).ToList();
+        var dataFieldPointers = dataFields.Select(NativePointer).OrderBy(value => value).ToList();
+        if (!uiFieldPointers.SequenceEqual(dataFieldPointers))
+        {
+            status = "the three visible Auto controls do not map to the three live battle fields";
+            return false;
+        }
+
+        var signature = string.Join("|", toggles.Select(toggle => NativePointer(toggle!)));
+        if (!string.Equals(signature, stableAutoUiSignature, StringComparison.Ordinal))
+        {
+            stableAutoUiSignature = signature;
+            stableAutoUiSince = Time.realtimeSinceStartup;
+            status = $"visible Auto controls=[{string.Join(",", selectedNames)}]; waiting for UI listeners to settle";
+            return false;
+        }
+        if (Time.realtimeSinceStartup - stableAutoUiSince < 1f)
+        {
+            status = $"visible Auto controls=[{string.Join(",", selectedNames)}]; waiting for UI listeners to settle";
+            return false;
+        }
+
+        foreach (var toggle in toggles)
+        {
+            if (!Convert.ToBoolean(Read(toggle, "isOn") ?? false, CultureInfo.InvariantCulture))
+            {
+                if (!TryClickUnityToggle(toggle!, out var error))
+                {
+                    status = $"could not click an Auto control: {error}";
+                    return false;
+                }
+            }
+        }
+
+        // A checked box alone is not success. The restart script is acknowledged
+        // only when every visible toggle is on and each corresponding field owns
+        // a live AdvBattleData instance.
+        var toggleStates = toggles.Select(toggle => Convert.ToBoolean(
+            Read(toggle, "isOn") ?? false, CultureInfo.InvariantCulture)).ToList();
+        var battleStates = dataFields.Select(field => Read(field, "advBattleData") is not null).ToList();
+        status = $"toggles=[{string.Join(",", toggleStates)}], battles=[{string.Join(",", battleStates)}]";
+        return toggleStates.All(value => value) && battleStates.All(value => value);
+    }
+
+    private static bool TryClickUnityToggle(object toggle, out string error)
+    {
+        try
+        {
+            var eventSystemType = AppDomain.CurrentDomain.GetAssemblies()
+                .Select(assembly => assembly.GetType("UnityEngine.EventSystems.EventSystem", false, false))
+                .FirstOrDefault(type => type is not null);
+            var pointerEventType = AppDomain.CurrentDomain.GetAssemblies()
+                .Select(assembly => assembly.GetType("UnityEngine.EventSystems.PointerEventData", false, false))
+                .FirstOrDefault(type => type is not null);
+            if (eventSystemType is null || pointerEventType is null)
+            {
+                error = "Unity EventSystem types unavailable";
+                return false;
+            }
+            var eventSystem = eventSystemType.GetProperty("current", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+            if (eventSystem is null)
+            {
+                error = "no active Unity EventSystem";
+                return false;
+            }
+            var pointerEvent = Activator.CreateInstance(pointerEventType, new[] { eventSystem });
+            if (pointerEvent is null)
+            {
+                error = "could not create PointerEventData";
+                return false;
+            }
+            var click = toggle.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                .FirstOrDefault(method => method.Name == "OnPointerClick" && method.GetParameters().Length == 1);
+            if (click is null)
+            {
+                error = "Toggle.OnPointerClick unavailable";
+                return false;
+            }
+            click.Invoke(toggle, new[] { pointerEvent });
+            error = string.Empty;
+            return true;
+        }
+        catch (Exception exception)
+        {
+            error = exception.GetBaseException().Message;
+            return false;
+        }
+    }
+
+    private static IEnumerable<object> FindActiveSceneObjects(Type componentType)
+    {
+        var findObjects = typeof(Resources).GetMethods(BindingFlags.Public | BindingFlags.Static)
+            .FirstOrDefault(method => method.Name == "FindObjectsOfTypeAll"
+                && method.IsGenericMethodDefinition
+                && method.GetParameters().Length == 0);
+        if (findObjects is null) yield break;
+        var objects = findObjects.MakeGenericMethod(componentType).Invoke(null, null);
+        foreach (var component in ReadSequence(objects))
+        {
+            var gameObject = Read(component, "gameObject");
+            if (Convert.ToBoolean(Read(gameObject, "activeInHierarchy") ?? false, CultureInfo.InvariantCulture))
+            {
+                yield return component;
+            }
+        }
+    }
+
+    private static bool TryClickContinueGame(string telemetryDirectory)
+    {
+        try
+        {
+            var mainSceneType = GameType("MainScene");
+            if (mainSceneType is null) return false;
+            foreach (var mainScene in FindActiveSceneObjects(mainSceneType))
+            {
+                var continueMethod = mainSceneType.GetMethod("OnContinueBtnClick", BindingFlags.Public | BindingFlags.Instance);
+                if (continueMethod is null) return false;
+                var readyPath = Path.Combine(telemetryDirectory, "continue.ready");
+                var positionedPath = Path.Combine(telemetryDirectory, "continue.positioned");
+                if (!File.Exists(positionedPath))
+                {
+                    if (!File.Exists(readyPath)) File.WriteAllText(readyPath, DateTimeOffset.Now.ToString("O"));
+                    return false;
+                }
+                continueMethod.Invoke(mainScene, null);
+                File.Delete(positionedPath);
+                if (File.Exists(readyPath)) File.Delete(readyPath);
+                return true;
+            }
+        }
+        catch (Exception error)
+        {
+            Instance?.Log.LogDebug($"Continue-game request is waiting: {error.Message}");
+        }
+        return false;
+    }
+
+    private static bool IsSaveDataReady()
+    {
+        var dataMgr = ReadStatic("Game", "dataMgr");
+        var seasonData = Read(dataMgr, "nowSeasonData");
+        var townData = Read(seasonData, "townData");
+        var saveTownData = Read(townData, "saveTownData");
+        return Read(saveTownData, "codexDic") is not null;
+    }
 
     private static void EmitLiveSlotSnapshot()
     {
@@ -107,6 +346,220 @@ public sealed class Plugin : BasePlugin
         Instance?.writer?.Enqueue("snapshot.slots", new { slots });
         Instance?.writer?.Enqueue("snapshot.heroes", new { heroes = allHeroes });
         Instance?.writer?.Enqueue("snapshot.resources", new { resources = DescribePrimaryResources(), sanctum = DescribeSanctum() });
+    }
+
+    private static void EmitCodexSnapshot()
+    {
+        var rarityDefinitions = new[]
+        {
+            (Key: "rare", Label: "Rare", Quality: 3),
+            (Key: "legendary", Label: "Legendary", Quality: 4),
+            (Key: "set", Label: "Set", Quality: 6),
+            (Key: "unique", Label: "Unique", Quality: 8),
+            (Key: "mythic", Label: "Mythic", Quality: 5)
+        };
+        var itemEntries = new List<Dictionary<string, object?>>();
+        var affixPoolEntries = new List<Dictionary<string, object?>>();
+        var poolIdsBySignature = new Dictionary<string, int>(StringComparer.Ordinal);
+        var equipRows = ReadValues(ReadStatic("TableData", "TEquipDict")).ToList();
+        var liveCodexByEquipId = ReadLiveCodexByEquipId();
+        var savedCodexItems = ReadSavedCodexItems();
+        var savedCodexByEquipId = savedCodexItems
+            .Select(save => (Id: ReadNullableInt(save, "id"), Save: save))
+            .Where(entry => entry.Id is not null)
+            .GroupBy(entry => entry.Id!.Value)
+            .ToDictionary(group => group.Key, group => group.Last().Save);
+
+        foreach (var rarity in rarityDefinitions)
+        {
+            foreach (var row in equipRows.Where(row => EquipMatchesCodexQuality(row, rarity.Quality)))
+            {
+                var equipId = ReadNullableInt(row, "id");
+                if (equipId is null) continue;
+                var icon = ReadString(row, "icon");
+                QueueIcon(icon);
+                var codexData = liveCodexByEquipId.GetValueOrDefault(equipId.Value)
+                    ?? CreateCodexEquipData(equipId.Value, rarity.Quality);
+                var stats = DescribeCodexAffixes(codexData);
+                var savedCodex = savedCodexByEquipId.GetValueOrDefault(equipId.Value);
+                var awarenessSave = codexData is null ? null : InvokeInstance(codexData, "GetAwarenessSaveItem");
+                var itemSave = Read(Read(codexData, "itemData"), "saveItemData") ?? savedCodex;
+                var wrapperAwarenessLevel = ReadNullableInt(awarenessSave, "awarenessLevel")
+                    ?? (codexData is null ? null : InvokeInt(codexData, "GetAwarenessLevel"));
+                var wrapperAwareness = ReadNullableInt(awarenessSave, "awareness")
+                    ?? (codexData is null ? null : InvokeInt(codexData, "GetAwareness"));
+                var awarenessLevel = rarity.Quality == 3
+                    ? ReadNullableInt(savedCodex, "awarenessLevel") ?? wrapperAwarenessLevel ?? 0
+                    : wrapperAwarenessLevel ?? ReadNullableInt(savedCodex, "awarenessLevel") ?? 0;
+                var awareness = rarity.Quality == 3
+                    ? ReadNullableInt(savedCodex, "awareness") ?? wrapperAwareness ?? 0
+                    : wrapperAwareness ?? ReadNullableInt(savedCodex, "awareness") ?? 0;
+                var eligibleAffixIds = stats.Select(stat => stat.Id).ToHashSet();
+                var excludedAffixIds = ReadSavedSealAffixIds(itemSave)
+                    .Concat(ReadSavedSealAffixIds(savedCodex))
+                    .Where(eligibleAffixIds.Contains)
+                    .Distinct()
+                    .OrderBy(id => id)
+                    .ToList();
+                var serializableStats = stats.Select(stat => stat.Payload).ToList();
+                var poolSignature = string.Join("|", serializableStats.Select(stat =>
+                    $"{stat.GetValueOrDefault("id")}:{stat.GetValueOrDefault("rank9Range")}:{stat.GetValueOrDefault("englishDescription")}"));
+                if (!poolIdsBySignature.TryGetValue(poolSignature, out var poolId))
+                {
+                    poolId = affixPoolEntries.Count + 1;
+                    poolIdsBySignature[poolSignature] = poolId;
+                    affixPoolEntries.Add(new Dictionary<string, object?> { ["id"] = poolId, ["stats"] = serializableStats });
+                }
+
+                var rawName = ReadString(row, "name");
+                var partId = ReadNullableInt(row, "part") ?? 0;
+                var subtypeId = ReadNullableInt(row, "minType") ?? 0;
+                var part = InvokeStatic("TableData", "getTEquipPartData", partId);
+                var subtype = subtypeId > 0 ? InvokeStatic("TableData", "getTWeaponTypeData", subtypeId) : null;
+                var partRawName = ReadString(part, "name");
+                var subtypeRawName = ReadString(subtype, "name");
+                itemEntries.Add(new Dictionary<string, object?>
+                {
+                    ["key"] = $"{rarity.Key}:{equipId.Value}",
+                    ["id"] = equipId,
+                    ["rarity"] = rarity.Key,
+                    ["rarityLabel"] = rarity.Label,
+                    ["quality"] = rarity.Quality,
+                    ["name"] = rawName,
+                    ["englishName"] = EnglishName(row, rawName),
+                    ["iconKey"] = icon,
+                    ["iconUrl"] = IconUrl(icon),
+                    ["part"] = partId,
+                    ["partName"] = EnglishName(part, partRawName),
+                    ["subtype"] = subtypeId,
+                    ["subtypeName"] = partId == 1
+                        ? ReadString(subtype, "name_en") ?? EnglishName(subtype, subtypeRawName)
+                        : null,
+                    ["sortIndex"] = ReadNullableInt(row, "index") ?? 0,
+                    ["awarenessLevel"] = awarenessLevel,
+                    ["awareness"] = awareness,
+                    ["affixPoolId"] = poolId,
+                    ["excludedAffixIds"] = excludedAffixIds
+                });
+            }
+        }
+
+        itemEntries = itemEntries
+            .OrderBy(item => Convert.ToInt32(item["quality"], CultureInfo.InvariantCulture))
+            .ThenBy(item => Convert.ToInt32(item["part"], CultureInfo.InvariantCulture))
+            .ThenBy(item => Convert.ToInt32(item["subtype"], CultureInfo.InvariantCulture))
+            .ThenBy(item => Convert.ToInt32(item["sortIndex"], CultureInfo.InvariantCulture))
+            .ThenBy(item => Convert.ToInt32(item["id"], CultureInfo.InvariantCulture))
+            .ToList();
+        ExportPendingIcons(768);
+        Instance?.writer?.Enqueue("snapshot.codex", new
+        {
+            items = itemEntries,
+            affixPools = affixPoolEntries,
+            rarities = rarityDefinitions.Select(rarity => new
+            {
+                key = rarity.Key,
+                label = rarity.Label,
+                quality = rarity.Quality,
+                count = itemEntries.Count(item => string.Equals(Convert.ToString(item["rarity"]), rarity.Key, StringComparison.Ordinal))
+            }).ToList()
+        });
+    }
+
+    private static List<object> ReadSavedCodexItems()
+    {
+        var dataMgr = ReadStatic("Game", "dataMgr");
+        var seasonData = Read(dataMgr, "nowSeasonData");
+        var townData = Read(seasonData, "townData");
+        var saveTownData = Read(townData, "saveTownData");
+        return ReadValues(Read(saveTownData, "codexDic")).ToList();
+    }
+
+    private static IEnumerable<int> ReadSavedSealAffixIds(object? saveItemData)
+    {
+        if (saveItemData is null) yield break;
+        var list = InvokeInstance(saveItemData, "GetSealAffixList") ?? Read(saveItemData, "sealAffixList");
+        foreach (var value in ReadList(list))
+        {
+            int id;
+            try { id = Convert.ToInt32(value, CultureInfo.InvariantCulture); }
+            catch { continue; }
+            if (id > 0) yield return id;
+        }
+    }
+
+    private static Dictionary<int, object> ReadLiveCodexByEquipId()
+    {
+        var dataMgr = ReadStatic("Game", "dataMgr");
+        var seasonData = Read(dataMgr, "nowSeasonData");
+        var townData = Read(seasonData, "townData");
+        var townCodexData = Read(townData, "townCodexData");
+        var result = new Dictionary<int, object>();
+        foreach (var codexData in ReadValues(Read(townCodexData, "equipCodexDic")))
+        {
+            var equipId = ReadNullableInt(Read(codexData, "tEquipData"), "id")
+                ?? ReadNullableInt(codexData, "id");
+            if (equipId is not null) result[equipId.Value] = codexData;
+        }
+        return result;
+    }
+
+    private static bool EquipMatchesCodexQuality(object equipRow, int quality)
+    {
+        try
+        {
+            var qualityType = GameType("EItemQualityType");
+            var method = GameType("TownCodexData")?.GetMethod("EquipMatchesUnlockCodexQuality", BindingFlags.Public | BindingFlags.Static);
+            if (qualityType is null || method is null) return false;
+            return Convert.ToBoolean(method.Invoke(null, new[] { Enum.ToObject(qualityType, quality), equipRow }), CultureInfo.InvariantCulture);
+        }
+        catch { return false; }
+    }
+
+    private static object? CreateCodexEquipData(int equipId, int quality)
+    {
+        try
+        {
+            var save = InvokeStaticArgs("SaveItemData", "CreateCodexStub", equipId, quality, 110);
+            var positionType = GameType("EItemPosType");
+            if (save is null || positionType is null) return null;
+            var item = InvokeStaticArgs("ItemData", "Create", save, Enum.ToObject(positionType, 12), 0);
+            return item is null ? null : InvokeStaticArgs("CodexEquipData", "Create", equipId, item);
+        }
+        catch { return null; }
+    }
+
+    private static List<CodexAffixDescription> DescribeCodexAffixes(object? codexData)
+    {
+        if (codexData is null) return new();
+        InvokeInstance(codexData, "GetSealAffixDic");
+        return ReadValues(Read(codexData, "sealAffixDic"))
+            .Select(seal =>
+            {
+                var affix = Read(seal, "tAffixData");
+                var affixQuality = Read(seal, "tAffixQualityData");
+                var id = ReadNullableInt(seal, "affixId") ?? ReadNullableInt(affix, "id") ?? 0;
+                var rawDescription = ReadString(affix, "des");
+                return new CodexAffixDescription
+                {
+                    Id = id,
+                    IsExcluded = Convert.ToBoolean(Read(seal, "isSeal") ?? false, CultureInfo.InvariantCulture),
+                    Payload = new Dictionary<string, object?>
+                    {
+                        ["id"] = id,
+                        ["rank"] = 9,
+                        ["description"] = rawDescription,
+                        ["englishDescription"] = EnglishText(affix, "_des", rawDescription),
+                        ["displayDescription"] = ReadString(seal, "affixDes"),
+                        ["rank9Range"] = InvokeInstanceString(seal, "GetAttrRange", 9),
+                        ["quality"] = ReadNullableInt(affixQuality, "id"),
+                        ["qualityName"] = EnglishName(affixQuality, ReadString(affixQuality, "name"))
+                    }
+                };
+            })
+            .Where(stat => stat.Id > 0)
+            .OrderBy(stat => stat.Id)
+            .ToList();
     }
 
     public override bool Unload()
@@ -973,6 +1426,20 @@ public sealed class Plugin : BasePlugin
         catch { return null; }
     }
 
+    private static object? InvokeInstance(object value, string method, params object[] arguments)
+    {
+        try
+        {
+            var candidate = value.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                .FirstOrDefault(entry => entry.Name == method && entry.GetParameters().Length == arguments.Length);
+            return candidate?.Invoke(value, arguments);
+        }
+        catch { return null; }
+    }
+
+    private static string? InvokeInstanceString(object value, string method, params object[] arguments)
+        => InvokeInstance(value, method, arguments)?.ToString();
+
     private static string? EnglishName(object? tableRow, string? fallback)
     {
         if (tableRow is null) return fallback;
@@ -1045,6 +1512,13 @@ public sealed class Plugin : BasePlugin
         public DateTimeOffset StartedAt { get; }
         public List<Dictionary<string, object?>> Enemies { get; } = new();
         public List<Dictionary<string, object?>> Loot { get; } = new();
+    }
+
+    private sealed class CodexAffixDescription
+    {
+        public int Id { get; init; }
+        public bool IsExcluded { get; init; }
+        public Dictionary<string, object?> Payload { get; init; } = new();
     }
 
     private sealed class EffectOriginRecord
