@@ -23,7 +23,7 @@ public sealed class Plugin : BasePlugin
 {
     public const string PluginGuid = "local.pathofidle.stats";
     public const string PluginName = "Path of Idle Stats";
-    public const string PluginVersion = "0.7.1";
+    public const string PluginVersion = "0.7.2";
 
     private static Plugin? Instance;
     private static readonly object StateLock = new();
@@ -477,7 +477,8 @@ public sealed class Plugin : BasePlugin
     private static void EmitInventorySnapshot()
     {
         var dataMgr = ReadStatic("Game", "dataMgr");
-        var lordData = Read(Read(dataMgr, "nowSeasonData"), "lordData");
+        var seasonData = Read(dataMgr, "nowSeasonData");
+        var lordData = Read(seasonData, "lordData");
         var bagData = Read(lordData, "lordBagData");
         var itemType = GameType("EItemType");
         var equipType = itemType is null ? null : Enum.ToObject(itemType, 2);
@@ -492,11 +493,63 @@ public sealed class Plugin : BasePlugin
             var item = Read(field, "itemData");
             if (item is null) continue;
             var described = DescribeItem(item);
+            described["storageLocation"] = "inventory";
             described["inventoryIndex"] = ReadNullableInt(Read(field, "saveItemFieldData"), "index") ?? fallbackIndex;
             items.Add(described);
         }
+
+        var houseStoreData = ReadValues(Read(Read(seasonData, "townData"), "houseDic"))
+            .Select(house => Read(house, "houseStoreData"))
+            .FirstOrDefault(store => Read(store, "storeBaseData") is not null || Read(store, "storeTreaData") is not null);
+        var storeBaseData = Read(houseStoreData, "storeBaseData");
+        var warehousePages = ReadEntries(Read(storeBaseData, "storeDic"))
+            .Select((entry, ordinal) => new
+            {
+                Page = Read(entry, "Value"),
+                Key = ReadNullableInt(entry, "Key"),
+                Ordinal = ordinal
+            })
+            .Where(entry => entry.Page is not null)
+            .ToList();
+        var warehouseUsesZeroBasedKeys = warehousePages.Any(entry => entry.Key == 0);
+        foreach (var pageEntry in warehousePages)
+        {
+            var storageTab = pageEntry.Key is { } key
+                ? key + (warehouseUsesZeroBasedKeys ? 1 : 0)
+                : pageEntry.Ordinal + 1;
+            foreach (var (field, fallbackIndex) in ReadList(pageEntry.Page).Select((field, index) => (field, index)))
+            {
+                var item = Read(field, "itemData");
+                if (!IsEquipmentItem(item)) continue;
+                var described = DescribeItem(item!);
+                described["storageLocation"] = "warehouse";
+                described["storagePage"] = storageTab;
+                described["storagePageKey"] = pageEntry.Key;
+                described["inventoryIndex"] = ReadNullableInt(Read(field, "saveItemFieldData"), "index") ?? fallbackIndex;
+                items.Add(described);
+            }
+        }
+
+        var storeTreaData = Read(houseStoreData, "storeTreaData");
+        foreach (var groupList in ReadValues(Read(storeTreaData, "equipGroupDic")))
+        {
+            foreach (var group in ReadList(groupList))
+            {
+                var saveGroup = Read(group, "saveEquipGroupData");
+                var groupId = ReadNullableInt(saveGroup, "id") ?? ReadNullableInt(Read(group, "tEquipData"), "id");
+                foreach (var (item, itemIndex) in ReadList(Read(group, "equipList")).Select((item, index) => (item, index)))
+                {
+                    if (!IsEquipmentItem(item)) continue;
+                    var described = DescribeItem(item);
+                    described["storageLocation"] = "vault";
+                    described["storageGroupId"] = groupId;
+                    described["inventoryIndex"] = itemIndex;
+                    items.Add(described);
+                }
+            }
+        }
         ExportPendingIcons(256);
-        Instance?.writer?.Enqueue("snapshot.inventory", new { source = "inventory", items });
+        Instance?.writer?.Enqueue("snapshot.inventory", new { source = "all-storage", items });
     }
 
     private static void InventoryItemAddedPostfix(object __0, bool __result) => SafeHook("inventory-item-added", () =>
@@ -505,10 +558,14 @@ public sealed class Plugin : BasePlugin
         var save = Read(__0, "saveItemData");
         if (!string.Equals(Read(save, "type")?.ToString(), "equip", StringComparison.OrdinalIgnoreCase)) return;
         var item = DescribeItem(__0);
+        item["storageLocation"] = "inventory";
         item["inventoryIndex"] = ReadNullableInt(__0, "fieldIndex");
         ExportPendingIcons(16);
         Instance?.writer?.Enqueue("inventory.item-added", new { item });
     });
+
+    private static bool IsEquipmentItem(object? item)
+        => item is not null && string.Equals(Read(Read(item, "saveItemData"), "type")?.ToString(), "equip", StringComparison.OrdinalIgnoreCase);
 
     private static List<object> ReadSavedCodexItems()
     {
@@ -1479,6 +1536,21 @@ public sealed class Plugin : BasePlugin
         for (var guard = 0; guard < 20000 && moveNext is not null && current is not null && (bool)(moveNext.Invoke(enumerator, null) ?? false); guard++)
         {
             var value = current.GetValue(enumerator); if (value is not null) yield return value;
+        }
+    }
+
+    private static IEnumerable<object> ReadEntries(object? dictionary)
+    {
+        if (dictionary is null) yield break;
+        var getEnumerator = dictionary.GetType().GetMethod("GetEnumerator", Type.EmptyTypes);
+        if (getEnumerator is null) yield break;
+        var enumerator = getEnumerator.Invoke(dictionary, null);
+        if (enumerator is null) yield break;
+        var moveNext = enumerator.GetType().GetMethod("MoveNext", Type.EmptyTypes);
+        var current = enumerator.GetType().GetProperty("Current");
+        for (var guard = 0; guard < 20000 && moveNext is not null && current is not null && (bool)(moveNext.Invoke(enumerator, null) ?? false); guard++)
+        {
+            var entry = current.GetValue(enumerator); if (entry is not null) yield return entry;
         }
     }
 

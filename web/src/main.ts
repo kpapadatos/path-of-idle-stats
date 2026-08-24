@@ -7,7 +7,7 @@ type TelemetryEvent = { type: string; timestamp?: string; payload?: unknown } & 
 type CombatTimelineEntry = { id: number; capturedAt: number; stats: any[]; effects: any[] };
 type CodexRarityKey = 'rare' | 'legendary' | 'set' | 'unique' | 'mythic';
 type CodexSnapshot = { updatedAt: string | null; items: any[]; affixPools: Array<{ id: number; stats: any[] }>; rarities: any[] };
-type ScannerFilter = { id: string; enabled: boolean; itemKeys: string[]; anchorItemKey: string | null; statIds: number[]; minimumAttributeMatches: number };
+type ScannerFilter = { id: string; title: string; enabled: boolean; itemKeys: string[]; anchorItemKey: string | null; statIds: number[]; minimumAttributeMatches: number };
 type ScannerMatch = any & { _matchedFilterIds: string[] };
 type TelemetryState = {
   connected: boolean;
@@ -233,7 +233,7 @@ type TelemetryState = {
       <section *ngIf="selectedPageTab() === 'scanner'" aria-label="Inventory scanner" class="space-y-4">
         <div class="flex items-center gap-2">
           <button type="button" (click)="scanInventory()" [disabled]="scannerScanning() || !state().gameRunning || !hasRunnableScannerFilters()" class="rounded-lg border border-emerald-700 bg-emerald-950/30 px-4 py-2 text-sm font-semibold text-emerald-300 transition hover:bg-emerald-950/60 disabled:cursor-not-allowed disabled:opacity-40">
-            <i class="fa-solid fa-magnifying-glass mr-2" aria-hidden="true"></i>{{ scannerScanning() ? 'Scanning…' : 'Scan inventory' }}
+            <i class="fa-solid fa-magnifying-glass mr-2" aria-hidden="true"></i>{{ scannerScanning() ? 'Scanning…' : 'Scan all storage' }}
           </button>
           <button type="button" (click)="createScannerFilter()" [disabled]="codexLoading()" class="rounded-lg border border-amber-700 bg-amber-950/30 px-4 py-2 text-sm font-semibold text-amber-300 transition hover:bg-amber-950/60 disabled:opacity-40">
             <i class="fa-solid fa-plus mr-2" aria-hidden="true"></i>Create item filter
@@ -257,17 +257,22 @@ type TelemetryState = {
             </div>
           </div>
         </section>
-        <p *ngIf="scannerHasRun() && !scannerMatches().length && !scannerScanning()" class="rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-6 text-center text-sm text-zinc-500">No inventory items matched the enabled filters.</p>
+        <p *ngIf="scannerHasRun() && !scannerMatches().length && !scannerScanning()" class="rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-6 text-center text-sm text-zinc-500">No items in the inventory, warehouse storage, or warehouse vault matched the enabled filters.</p>
 
         <div *ngIf="scannerFilters().length; else noScannerFilters" class="grid grid-cols-3 gap-3">
           <article *ngFor="let filter of scannerFilters(); let filterIndex = index; trackBy: trackScannerFilter" class="min-w-0 rounded-xl border border-zinc-700 bg-zinc-950 p-3">
             <div class="flex items-center gap-2">
-              <label class="flex min-w-0 flex-1 cursor-pointer items-center gap-2"><input type="checkbox" [checked]="filter.enabled" (change)="setScannerFilterEnabled(filter.id, $event)" class="h-4 w-4 accent-amber-500"><span class="truncate text-sm font-semibold text-zinc-200">Item filter {{ filterIndex + 1 }}</span></label>
+              <label class="flex shrink-0 cursor-pointer items-center" [attr.aria-label]="(filter.title || 'Item filter ' + (filterIndex + 1)) + (filter.enabled ? ', enabled' : ', disabled')"><input type="checkbox" [checked]="filter.enabled" (change)="setScannerFilterEnabled(filter.id, $event)" class="h-4 w-4 accent-amber-500"></label>
+              <div class="min-w-0 flex-1">
+                <input *ngIf="renamingScannerFilterId() === filter.id; else scannerFilterTitle" type="text" autofocus [value]="scannerFilterTitleDraft()" (focus)="$any($event.target).select()" (input)="setScannerFilterTitleDraft($event)" (click)="$event.stopPropagation()" (dblclick)="$event.stopPropagation()" (keydown.enter)="commitScannerFilterTitle(filter.id)" (keydown.escape)="cancelScannerFilterTitleEdit($event)" (blur)="commitScannerFilterTitle(filter.id)" [attr.aria-label]="'Rename ' + scannerFilterDisplayTitle(filter, filterIndex)" class="h-8 w-full rounded-md border border-amber-600 bg-zinc-900 px-2 text-sm font-semibold text-zinc-100 outline-none focus:ring-1 focus:ring-amber-500">
+                <ng-template #scannerFilterTitle><span (click)="startScannerFilterTitleEdit(filter, filterIndex)" class="block cursor-text truncate rounded px-1 text-sm font-semibold text-zinc-200 hover:bg-zinc-900" title="Click to rename">{{ scannerFilterDisplayTitle(filter, filterIndex) }}</span></ng-template>
+              </div>
               <button type="button" (click)="editScannerFilter(filter.id)" aria-label="Edit filter" class="h-8 w-8 rounded-lg text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"><i class="fa-solid fa-pen"></i></button>
               <button type="button" (click)="deleteScannerFilter(filter.id)" aria-label="Delete filter" class="h-8 w-8 rounded-lg text-zinc-600 hover:bg-rose-950/50 hover:text-rose-300"><i class="fa-solid fa-trash"></i></button>
             </div>
             <div class="mt-3 flex min-h-12 flex-wrap gap-1.5">
-              <div *ngFor="let item of scannerFilterItems(filter); trackBy: trackCodexItem" [class]="'h-11 w-11 rounded-lg border p-1 ' + rarityIconClass($any(item).rarity)" [attr.title]="$any(item).englishName || $any(item).name"><img *ngIf="$any(item).iconUrl" [src]="$any(item).iconUrl" class="h-full w-full object-contain" alt=""></div>
+              <div *ngFor="let item of scannerFilterPreviewItems(filter); trackBy: trackCodexItem" [class]="'h-11 w-11 rounded-lg border p-1 ' + rarityIconClass($any(item).rarity)" [attr.title]="$any(item).englishName || $any(item).name"><img *ngIf="$any(item).iconUrl" [src]="$any(item).iconUrl" class="h-full w-full object-contain" alt=""></div>
+              <div *ngIf="scannerFilterRemainingItemCount(filter) as remaining" class="flex h-11 min-w-11 items-center justify-center rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-center text-[10px] font-semibold leading-tight text-zinc-400" [attr.title]="remaining + ' additional selected items'">+{{ remaining }}<br>more</div>
               <span *ngIf="!filter.itemKeys.length" class="self-center text-xs text-zinc-600">No items selected</span>
             </div>
             <div class="mt-3 border-t border-zinc-800 pt-3"><div class="mb-2 flex items-center justify-between gap-2"><p class="text-[10px] font-semibold uppercase tracking-wide text-zinc-600">Required attributes</p><span *ngIf="filter.statIds.length" class="text-[10px] text-zinc-600">At least {{ filter.minimumAttributeMatches }} of {{ filter.statIds.length }}</span></div><div class="flex flex-wrap gap-1.5"><span *ngFor="let stat of scannerFilterStats(filter); trackBy: trackCodexStat" class="rounded-md bg-zinc-900 px-2 py-1 text-xs text-zinc-400">{{ scannerStatTitle(stat) }}</span><span *ngIf="!filter.statIds.length" class="text-xs text-zinc-600">Any attributes</span></div></div>
@@ -361,7 +366,7 @@ type TelemetryState = {
       <div id="scanner-tooltip" *ngIf="scannerTooltip() as tooltip" role="tooltip" class="pointer-events-none fixed left-0 top-0 z-[80] w-80 rounded-xl border border-zinc-700 bg-zinc-950 p-3 text-left shadow-2xl shadow-black/70 will-change-transform">
         <ng-container *ngIf="$any(tooltip).kind === 'match'; else scannerNonMatchTooltip">
           <ng-container *ngIf="$any(tooltip).item as item">
-            <div class="flex items-start gap-3"><div [class]="'h-12 w-12 shrink-0 rounded-lg border p-1.5 ' + rarityIconClass($any(item).rarity)"><img *ngIf="$any(item).iconUrl" [src]="$any(item).iconUrl" class="h-full w-full object-contain" alt=""></div><div><h3 class="font-semibold text-zinc-100">{{ $any(item).englishName || $any(item).name }}</h3><p class="text-xs text-amber-300">{{ $any(item).qualityName || scannerRarityLabel($any(item).rarity) }} · Level {{ $any(item).level ?? '?' }} · {{ $any(item).partName || 'Equipment' }}</p></div></div>
+            <div class="flex items-start gap-3"><div [class]="'h-12 w-12 shrink-0 rounded-lg border p-1.5 ' + rarityIconClass($any(item).rarity)"><img *ngIf="$any(item).iconUrl" [src]="$any(item).iconUrl" class="h-full w-full object-contain" alt=""></div><div><h3 class="font-semibold text-zinc-100">{{ $any(item).englishName || $any(item).name }}</h3><p class="text-xs text-amber-300">{{ $any(item).qualityName || scannerRarityLabel($any(item).rarity) }} · Level {{ $any(item).level ?? '?' }} · {{ $any(item).partName || 'Equipment' }}</p><p class="mt-0.5 text-[10px] font-semibold uppercase tracking-wide text-cyan-300">{{ scannerStorageLabel($any(item)) }}</p></div></div>
             <div class="mt-3 grid grid-cols-3 gap-2 border-t border-zinc-800 pt-2 text-[10px] text-zinc-500"><span>Forge <b class="text-zinc-300">+{{ $any(item).forgeLevel ?? 0 }}</b></span><span>Main <b class="text-zinc-300">{{ $any(item).mainAttributeValue ?? 0 }}</b></span><span>Slots <b class="text-zinc-300">{{ $any(item).slotCount ?? 0 }}</b></span></div>
             <div class="mt-2 space-y-1 border-t border-zinc-800 pt-2"><p *ngFor="let stat of $any(item).affixes; trackBy: trackInventoryAffix" class="whitespace-pre-line text-xs text-zinc-300"><span class="mr-1 text-zinc-600">{{ $any(stat).rank ?? '?' }}</span>{{ inventoryAffixText($any(stat)) }}</p></div>
             <p class="mt-2 text-[10px] text-zinc-600">Matched {{ $any(item)._matchedFilterIds.length }} enabled filter{{ $any(item)._matchedFilterIds.length === 1 ? '' : 's' }}</p>
@@ -551,6 +556,8 @@ class AppComponent implements OnInit, OnDestroy {
   readonly codexLoading = signal(false);
   readonly codexError = signal<string | null>(null);
   readonly scannerFilters = signal<ScannerFilter[]>([]);
+  readonly renamingScannerFilterId = signal<string | null>(null);
+  readonly scannerFilterTitleDraft = signal('');
   readonly editingScannerFilterId = signal<string | null>(null);
   readonly scannerItemSearch = signal('');
   readonly scannerAvailableStatSearch = signal('');
@@ -716,7 +723,7 @@ class AppComponent implements OnInit, OnDestroy {
     this.stream.onerror = () => this.status.set('Reconnecting');
     this.stream.onmessage = event => {
       const previousSnapshotTimestamp = this.latestSlotSnapshotTimestamp(this.state());
-      const next = { ...JSON.parse(event.data), catalogs: this.catalogs() } as TelemetryState;
+      const next = { ...this.state(), ...JSON.parse(event.data), catalogs: this.catalogs() } as TelemetryState;
       this.state.set(next);
       this.handleInventoryItemAdded(next.inventoryItemAdded || null);
       if (next.gameRunning) void this.refreshTalentCatalogIfNeeded();
@@ -892,6 +899,8 @@ class AppComponent implements OnInit, OnDestroy {
     const keys = new Set(filter.itemKeys);
     return this.codexSnapshot().items.filter((item: any) => keys.has(this.codexItemKey(item)));
   }
+  scannerFilterPreviewItems(filter: ScannerFilter): any[] { return this.scannerFilterItems(filter).slice(0, 5); }
+  scannerFilterRemainingItemCount(filter: ScannerFilter): number { return Math.max(0, filter.itemKeys.length - 5); }
   scannerFilterStats(filter: ScannerFilter): any[] {
     const ids = new Set(filter.statIds);
     const stats = new Map<number, any>();
@@ -904,14 +913,22 @@ class AppComponent implements OnInit, OnDestroy {
     return [...stats.values()];
   }
   trackScannerFilter(_index: number, filter: ScannerFilter): string { return filter.id; }
-  trackScannerMatch(_index: number, item: ScannerMatch): string { return `${item?.inventoryIndex ?? 'unknown'}:${item?.rarity}:${item?.id}`; }
+  readonly trackScannerMatch = (_index: number, item: ScannerMatch): string => this.scannerItemIdentity(item);
   trackInventoryAffix(_index: number, stat: any): string { return `${stat?.id ?? 'unknown'}:${stat?.rank ?? 'unknown'}:${_index}`; }
   inventoryAffixText(stat: any): string { return this.plainGameText(stat?.displayDescription || stat?.englishDescription || stat?.description || 'Unknown attribute'); }
+  scannerStorageLabel(item: any): string {
+    if (item?.storageLocation === 'warehouse') {
+      const tab = Number(item?.storagePage);
+      return Number.isFinite(tab) && tab > 0 ? `Warehouse storage - Tab ${tab}` : 'Warehouse storage';
+    }
+    if (item?.storageLocation === 'vault') return 'Warehouse vault';
+    return 'Inventory';
+  }
   hasRunnableScannerFilters(): boolean { return this.scannerFilters().some(filter => filter.enabled && filter.itemKeys.length > 0); }
   async createScannerFilter() {
     await this.ensureScannerCodex();
     if (!this.codexSnapshot().items.length) return;
-    const filter: ScannerFilter = { id: this.newScannerFilterId(), enabled: true, itemKeys: [], anchorItemKey: null, statIds: [], minimumAttributeMatches: 1 };
+    const filter: ScannerFilter = { id: this.newScannerFilterId(), title: '', enabled: true, itemKeys: [], anchorItemKey: null, statIds: [], minimumAttributeMatches: 1 };
     this.scannerFilters.update(filters => [...filters, filter]);
     this.invalidateScannerResults();
     this.saveScannerFilters();
@@ -935,6 +952,23 @@ class AppComponent implements OnInit, OnDestroy {
   setScannerFilterEnabled(id: string, event: Event) {
     const enabled = (event.target as HTMLInputElement).checked;
     this.updateScannerFilter(id, filter => ({ ...filter, enabled }));
+  }
+  scannerFilterDisplayTitle(filter: ScannerFilter, index: number): string { return filter.title || `Item filter ${index + 1}`; }
+  startScannerFilterTitleEdit(filter: ScannerFilter, index: number) {
+    this.scannerFilterTitleDraft.set(this.scannerFilterDisplayTitle(filter, index));
+    this.renamingScannerFilterId.set(filter.id);
+  }
+  setScannerFilterTitleDraft(event: Event) { this.scannerFilterTitleDraft.set((event.target as HTMLInputElement).value); }
+  commitScannerFilterTitle(id: string) {
+    if (this.renamingScannerFilterId() !== id) return;
+    const title = this.scannerFilterTitleDraft().trim();
+    this.scannerFilters.update(filters => filters.map(filter => filter.id === id ? { ...filter, title } : filter));
+    this.renamingScannerFilterId.set(null);
+    this.saveScannerFilters();
+  }
+  cancelScannerFilterTitleEdit(event: Event) {
+    event.preventDefault();
+    this.renamingScannerFilterId.set(null);
   }
   setScannerItemSearch(event: Event) { this.scannerItemSearch.set((event.target as HTMLInputElement).value); }
   setScannerAvailableStatSearch(event: Event) { this.scannerAvailableStatSearch.set((event.target as HTMLInputElement).value); }
@@ -1014,7 +1048,7 @@ class AppComponent implements OnInit, OnDestroy {
       for (const item of (live.inventory || []) as any[]) {
         const matching = this.matchingScannerFilters(item, enabled);
         if (!matching.length) continue;
-        const key = `${item?.inventoryIndex ?? 'unknown'}:${this.codexItemKey(item)}`;
+        const key = this.scannerItemIdentity(item);
         matches.set(key, { ...item, _matchedFilterIds: matching.map(filter => filter.id) });
       }
       this.scannerMatches.set([...matches.values()]);
@@ -1049,8 +1083,8 @@ class AppComponent implements OnInit, OnDestroy {
     const matching = this.matchingScannerFilters(item);
     if (!matching.length) return;
     const match: ScannerMatch = { ...item, _matchedFilterIds: matching.map(filter => filter.id) };
-    const key = `${item?.inventoryIndex ?? timestamp}:${this.codexItemKey(item)}`;
-    this.scannerMatches.update(items => [match, ...items.filter(existing => `${existing?.inventoryIndex ?? 'unknown'}:${this.codexItemKey(existing)}` !== key)]);
+    const key = this.scannerItemIdentity(item, timestamp);
+    this.scannerMatches.update(items => [match, ...items.filter(existing => this.scannerItemIdentity(existing) !== key)]);
     this.scannerHasRun.set(true);
     this.playScannerMatchSound();
   }
@@ -1083,6 +1117,9 @@ class AppComponent implements OnInit, OnDestroy {
     if (context.state === 'running') play(); else void context.resume().then(play).catch(() => undefined);
   }
   private codexItemKey(item: any): string { return String(item?.key || `${item?.rarity}:${item?.id}`); }
+  private scannerItemIdentity(item: any, fallbackIndex: string | number = 'unknown'): string {
+    return `${item?.storageLocation || 'inventory'}:${item?.storagePage ?? item?.storageGroupId ?? 'none'}:${item?.inventoryIndex ?? fallbackIndex}:${this.codexItemKey(item)}`;
+  }
   private newScannerFilterId(): string { return `filter-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`; }
   private updateScannerFilter(id: string, update: (filter: ScannerFilter) => ScannerFilter) {
     this.scannerFilters.update(filters => filters.map(filter => filter.id === id ? this.normalizeScannerFilter(update(filter)) : filter));
@@ -1161,6 +1198,7 @@ class AppComponent implements OnInit, OnDestroy {
           const storedMinimum = Number(filter.minimumAttributeMatches);
           return this.normalizeScannerFilter({
             id: filter.id,
+            title: typeof filter.title === 'string' ? filter.title.trim() : '',
             enabled: filter.enabled !== false,
             itemKeys: Array.isArray(filter.itemKeys) ? filter.itemKeys.map(String) : [],
             anchorItemKey: typeof filter.anchorItemKey === 'string' ? filter.anchorItemKey : null,

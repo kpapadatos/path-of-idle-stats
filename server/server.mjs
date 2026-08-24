@@ -56,17 +56,19 @@ function applyEvent(event) {
       return true;
     });
   }
-  const message = `data: ${JSON.stringify(publicState())}\n\n`;
+  const message = `data: ${JSON.stringify(publicState(false))}\n\n`;
   for (const client of clients) client.write(message);
 }
 
-function publicState() {
+function publicState(includeInventory = true) {
   const { catalogs, ...live } = state;
-  return live;
+  if (includeInventory) return live;
+  const { inventory, ...streamable } = live;
+  return streamable;
 }
 
 function broadcastState() {
-  const message = `data: ${JSON.stringify(publicState())}\n\n`;
+  const message = `data: ${JSON.stringify(publicState(false))}\n\n`;
   for (const client of clients) client.write(message);
 }
 
@@ -122,7 +124,7 @@ const server = createServer(async (request, response) => {
     }
     if (request.method === 'GET' && url.pathname === '/api/stream') {
       response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
-      response.write(`data: ${JSON.stringify(publicState())}\n\n`);
+      response.write(`data: ${JSON.stringify(publicState(false))}\n\n`);
       clients.add(response);
       request.on('close', () => clients.delete(response));
       return;
