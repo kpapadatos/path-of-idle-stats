@@ -7,11 +7,15 @@ type TelemetryEvent = { type: string; timestamp?: string; payload?: unknown } & 
 type CombatTimelineEntry = { id: number; capturedAt: number; stats: any[]; effects: any[] };
 type CodexRarityKey = 'rare' | 'legendary' | 'set' | 'unique' | 'mythic';
 type CodexSnapshot = { updatedAt: string | null; items: any[]; affixPools: Array<{ id: number; stats: any[] }>; rarities: any[] };
+type ScannerFilter = { id: string; enabled: boolean; itemKeys: string[]; anchorItemKey: string | null; statIds: number[]; minimumAttributeMatches: number };
+type ScannerMatch = any & { _matchedFilterIds: string[] };
 type TelemetryState = {
   connected: boolean;
   gameRunning: boolean;
   updatedAt: string | null;
   snapshotUpdatedAt?: string | null;
+  inventoryUpdatedAt?: string | null;
+  inventoryItemAdded?: TelemetryEvent | null;
   heroes: unknown[];
   slots: Array<{ battleIndex: number; heroes: unknown[] }>;
   resources: unknown[];
@@ -58,6 +62,7 @@ type TelemetryState = {
         <button type="button" role="tab" (click)="selectPageTab('battles')" [attr.aria-selected]="selectedPageTab() === 'battles'" class="border-b-2 px-4 py-2 text-sm font-medium" [class]="selectedPageTab() === 'battles' ? 'border-amber-400 text-amber-300' : 'border-transparent text-zinc-500 hover:text-zinc-300'">Battles</button>
         <button type="button" role="tab" (click)="selectPageTab('compendium')" [attr.aria-selected]="selectedPageTab() === 'compendium'" class="border-b-2 px-4 py-2 text-sm font-medium" [class]="selectedPageTab() === 'compendium' ? 'border-amber-400 text-amber-300' : 'border-transparent text-zinc-500 hover:text-zinc-300'">Talents</button>
         <button type="button" role="tab" (click)="selectPageTab('codex')" [attr.aria-selected]="selectedPageTab() === 'codex'" class="border-b-2 px-4 py-2 text-sm font-medium" [class]="selectedPageTab() === 'codex' ? 'border-amber-400 text-amber-300' : 'border-transparent text-zinc-500 hover:text-zinc-300'">Codex</button>
+        <button type="button" role="tab" (click)="selectPageTab('scanner')" [attr.aria-selected]="selectedPageTab() === 'scanner'" class="border-b-2 px-4 py-2 text-sm font-medium" [class]="selectedPageTab() === 'scanner' ? 'border-amber-400 text-amber-300' : 'border-transparent text-zinc-500 hover:text-zinc-300'">Scanner</button>
       </nav>
 
       <div #pageTabBody class="page-tab-body min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1 pb-3">
@@ -214,7 +219,7 @@ type TelemetryState = {
             <p *ngIf="codexError()" class="mb-3 rounded-lg border border-rose-900 bg-rose-950/30 px-3 py-2 text-sm text-rose-300">{{ codexError() }}</p>
             <div *ngIf="codexItems().length" class="overflow-x-auto">
               <div class="grid min-w-[720px] grid-cols-10 gap-2">
-                <button type="button" *ngFor="let item of codexItems(); trackBy: trackCodexItem" (click)="openCodexItem(item)" [attr.title]="$any(item).englishName || $any(item).name" [attr.aria-label]="codexItemAriaLabel(item)" class="group relative aspect-square rounded-lg border border-zinc-700 bg-zinc-900 p-1.5 transition hover:border-amber-500 hover:bg-zinc-800">
+                <button type="button" *ngFor="let item of codexItems(); trackBy: trackCodexItem" (click)="openCodexItem(item)" [attr.title]="$any(item).englishName || $any(item).name" [attr.aria-label]="codexItemAriaLabel(item)" [class]="'group relative aspect-square rounded-lg border p-1.5 transition hover:brightness-125 ' + rarityIconClass($any(item).rarity)">
                   <img *ngIf="$any(item).iconUrl" [src]="$any(item).iconUrl" class="h-full w-full object-contain" alt="">
                   <span class="absolute bottom-1 right-1 rounded bg-black/85 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-amber-300">{{ $any(item).awarenessLevel ?? 0 }}</span>
                 </button>
@@ -224,13 +229,59 @@ type TelemetryState = {
           </div>
         </div>
       </section>
+
+      <section *ngIf="selectedPageTab() === 'scanner'" aria-label="Inventory scanner" class="space-y-4">
+        <div class="flex items-center gap-2">
+          <button type="button" (click)="scanInventory()" [disabled]="scannerScanning() || !state().gameRunning || !hasRunnableScannerFilters()" class="rounded-lg border border-emerald-700 bg-emerald-950/30 px-4 py-2 text-sm font-semibold text-emerald-300 transition hover:bg-emerald-950/60 disabled:cursor-not-allowed disabled:opacity-40">
+            <i class="fa-solid fa-magnifying-glass mr-2" aria-hidden="true"></i>{{ scannerScanning() ? 'Scanning…' : 'Scan inventory' }}
+          </button>
+          <button type="button" (click)="createScannerFilter()" [disabled]="codexLoading()" class="rounded-lg border border-amber-700 bg-amber-950/30 px-4 py-2 text-sm font-semibold text-amber-300 transition hover:bg-amber-950/60 disabled:opacity-40">
+            <i class="fa-solid fa-plus mr-2" aria-hidden="true"></i>Create item filter
+          </button>
+          <span *ngIf="scannerError()" class="ml-2 text-sm text-rose-300">{{ scannerError() }}</span>
+          <div class="ml-auto flex items-center gap-1.5">
+            <label class="flex cursor-pointer select-none items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-zinc-300 hover:bg-zinc-900">
+              <input type="checkbox" [checked]="scannerAutoEnabled()" (change)="setScannerAutoEnabled($event)" class="peer sr-only">
+              <span class="relative h-5 w-9 rounded-full border border-zinc-700 bg-zinc-900 transition peer-checked:border-emerald-600 peer-checked:bg-emerald-950"><span class="absolute left-0.5 top-0.5 h-3.5 w-3.5 rounded-full transition" [class.translate-x-4]="scannerAutoEnabled()" [class.bg-emerald-300]="scannerAutoEnabled()" [class.bg-zinc-500]="!scannerAutoEnabled()"></span></span>
+              <span>Auto</span>
+            </label>
+            <button type="button" (pointerenter)="showScannerAutoTooltip($event)" (pointerleave)="hideTooltips()" aria-label="About automatic inventory scanning" class="flex h-7 w-7 items-center justify-center rounded-full text-zinc-600 hover:text-zinc-300"><i class="fa-solid fa-circle-info text-xs" aria-hidden="true"></i></button>
+          </div>
+        </div>
+
+        <section *ngIf="scannerHasRun() && scannerMatches().length" class="rounded-2xl border border-emerald-900 bg-emerald-950/10 p-4" aria-label="Scanner matches">
+          <div class="mb-3 flex items-center justify-between"><h2 class="font-semibold text-emerald-200">Matches</h2><span class="text-xs text-zinc-500">{{ scannerMatches().length }} item{{ scannerMatches().length === 1 ? '' : 's' }}</span></div>
+          <div class="flex flex-wrap gap-3">
+            <div *ngFor="let item of scannerMatches(); trackBy: trackScannerMatch" (pointerenter)="showScannerMatchTooltip($event, item)" (pointerleave)="hideTooltips()" class="relative">
+              <div [class]="'h-16 w-16 rounded-xl border p-2 shadow-lg transition hover:brightness-125 ' + rarityIconClass($any(item).rarity)"><img *ngIf="$any(item).iconUrl" [src]="$any(item).iconUrl" class="h-full w-full object-contain" [alt]="$any(item).englishName || $any(item).name"></div>
+            </div>
+          </div>
+        </section>
+        <p *ngIf="scannerHasRun() && !scannerMatches().length && !scannerScanning()" class="rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-6 text-center text-sm text-zinc-500">No inventory items matched the enabled filters.</p>
+
+        <div *ngIf="scannerFilters().length; else noScannerFilters" class="grid grid-cols-3 gap-3">
+          <article *ngFor="let filter of scannerFilters(); let filterIndex = index; trackBy: trackScannerFilter" class="min-w-0 rounded-xl border border-zinc-700 bg-zinc-950 p-3">
+            <div class="flex items-center gap-2">
+              <label class="flex min-w-0 flex-1 cursor-pointer items-center gap-2"><input type="checkbox" [checked]="filter.enabled" (change)="setScannerFilterEnabled(filter.id, $event)" class="h-4 w-4 accent-amber-500"><span class="truncate text-sm font-semibold text-zinc-200">Item filter {{ filterIndex + 1 }}</span></label>
+              <button type="button" (click)="editScannerFilter(filter.id)" aria-label="Edit filter" class="h-8 w-8 rounded-lg text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"><i class="fa-solid fa-pen"></i></button>
+              <button type="button" (click)="deleteScannerFilter(filter.id)" aria-label="Delete filter" class="h-8 w-8 rounded-lg text-zinc-600 hover:bg-rose-950/50 hover:text-rose-300"><i class="fa-solid fa-trash"></i></button>
+            </div>
+            <div class="mt-3 flex min-h-12 flex-wrap gap-1.5">
+              <div *ngFor="let item of scannerFilterItems(filter); trackBy: trackCodexItem" [class]="'h-11 w-11 rounded-lg border p-1 ' + rarityIconClass($any(item).rarity)" [attr.title]="$any(item).englishName || $any(item).name"><img *ngIf="$any(item).iconUrl" [src]="$any(item).iconUrl" class="h-full w-full object-contain" alt=""></div>
+              <span *ngIf="!filter.itemKeys.length" class="self-center text-xs text-zinc-600">No items selected</span>
+            </div>
+            <div class="mt-3 border-t border-zinc-800 pt-3"><div class="mb-2 flex items-center justify-between gap-2"><p class="text-[10px] font-semibold uppercase tracking-wide text-zinc-600">Required attributes</p><span *ngIf="filter.statIds.length" class="text-[10px] text-zinc-600">At least {{ filter.minimumAttributeMatches }} of {{ filter.statIds.length }}</span></div><div class="flex flex-wrap gap-1.5"><span *ngFor="let stat of scannerFilterStats(filter); trackBy: trackCodexStat" class="rounded-md bg-zinc-900 px-2 py-1 text-xs text-zinc-400">{{ scannerStatTitle(stat) }}</span><span *ngIf="!filter.statIds.length" class="text-xs text-zinc-600">Any attributes</span></div></div>
+          </article>
+        </div>
+        <ng-template #noScannerFilters><div class="rounded-xl border border-dashed border-zinc-800 py-16 text-center"><i class="fa-solid fa-filter mb-3 text-2xl text-zinc-700"></i><p class="text-sm text-zinc-500">Create an item filter to start scanning the inventory.</p></div></ng-template>
+      </section>
       </div>
 
       <div *ngIf="selectedCodexItem() as item" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" (click)="closeCodexItem()">
         <section role="dialog" aria-modal="true" [attr.aria-label]="($any(item).englishName || $any(item).name || 'Codex item') + ' possible attributes'" class="flex max-h-[88vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-zinc-700 bg-zinc-950 shadow-2xl" (click)="$event.stopPropagation()">
           <header class="flex shrink-0 items-start justify-between gap-4 border-b border-zinc-800 p-5">
             <div class="flex min-w-0 items-center gap-3">
-              <div class="h-16 w-16 shrink-0 rounded-xl border border-zinc-700 bg-zinc-900 p-2"><img *ngIf="$any(item).iconUrl" [src]="$any(item).iconUrl" class="h-full w-full object-contain" alt=""></div>
+              <div [class]="'h-16 w-16 shrink-0 rounded-xl border p-2 ' + rarityIconClass($any(item).rarity)"><img *ngIf="$any(item).iconUrl" [src]="$any(item).iconUrl" class="h-full w-full object-contain" alt=""></div>
               <div class="min-w-0">
                 <h2 class="truncate text-xl font-semibold text-zinc-100">{{ $any(item).englishName || $any(item).name || 'Unknown item' }}</h2>
                 <p class="mt-1 text-sm text-amber-300">{{ $any(item).rarityLabel }} · {{ $any(item).partName || 'Equipment' }}<span *ngIf="$any(item).partName === 'Weapon' && $any(item).subtypeName"> · {{ $any(item).subtypeName }}</span></p>
@@ -253,6 +304,73 @@ type TelemetryState = {
             <ng-template #noCodexStats><p class="py-10 text-center text-sm text-zinc-600">{{ selectedCodexStats().length ? 'No attributes match this search.' : 'The game returned no possible attributes for this item.' }}</p></ng-template>
           </div>
         </section>
+      </div>
+
+      <div *ngIf="editingScannerFilter() as filter" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" (click)="closeScannerFilter()">
+        <section role="dialog" aria-modal="true" aria-label="Edit item filter" class="flex h-[90vh] max-h-[90vh] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-zinc-700 bg-zinc-950 shadow-2xl" (click)="$event.stopPropagation()">
+          <header class="flex shrink-0 items-center justify-between border-b border-zinc-800 px-5 py-4"><div><h2 class="text-xl font-semibold text-zinc-100">Item filter</h2><p class="mt-1 text-xs text-zinc-500">Changes are saved automatically. Right-click selected items or attributes to remove them.</p></div><button type="button" (click)="closeScannerFilter()" class="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-400 hover:bg-zinc-800 hover:text-white">Close</button></header>
+          <div class="grid min-h-0 flex-1 grid-rows-[minmax(15rem,0.9fr)_minmax(19rem,1.1fr)] gap-4 overflow-hidden p-5">
+            <div class="grid min-h-0 grid-cols-2 gap-4">
+            <section class="flex min-h-0 flex-col overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900/30">
+              <div class="shrink-0 border-b border-zinc-800 p-3">
+                <div class="mb-3"><h3 class="font-semibold text-zinc-200">Items</h3><p class="text-xs text-zinc-600">{{ scannerPrimaryTypeLabel() }}</p></div>
+                <input type="search" aria-label="Search items" placeholder="Search all items…" [value]="scannerItemSearch()" (input)="setScannerItemSearch($event)" class="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-amber-500">
+              </div>
+              <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3">
+                <div class="grid grid-cols-10 gap-2">
+                  <button type="button" *ngFor="let item of scannerPickerItems(); trackBy: trackCodexItem" (click)="toggleScannerItem(item)" (contextmenu)="removeScannerPickerItem($event, item)" [attr.aria-pressed]="scannerItemSelected(item)" [attr.aria-label]="($any(item).englishName || $any(item).name) + ', ' + scannerRarityLabel($any(item).rarity)" [attr.title]="($any(item).englishName || $any(item).name) + (scannerItemSelected(item) ? ' — click or right-click to unselect' : '')" [class]="'relative aspect-square rounded-lg border p-1.5 transition hover:brightness-125 ' + rarityIconClass($any(item).rarity) + (scannerItemSelected(item) ? ' ring-2 ring-emerald-400 ring-offset-1 ring-offset-zinc-950' : '')"><img *ngIf="$any(item).iconUrl" [src]="$any(item).iconUrl" class="h-full w-full object-contain" alt=""><i *ngIf="scannerItemSelected(item)" class="fa-solid fa-check absolute right-1 top-1 rounded-full bg-black/80 p-1 text-[9px] text-emerald-300"></i></button>
+                </div>
+                <p *ngIf="!scannerPickerItems().length" class="py-10 text-center text-sm text-zinc-600">No items match this search and type.</p>
+              </div>
+            </section>
+            <section class="flex min-h-0 flex-col overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900/30">
+              <div class="shrink-0 border-b border-zinc-800 p-3"><h3 class="font-semibold text-zinc-200">Options</h3><p class="text-xs text-zinc-600">Control how strictly the selected attributes are matched.</p></div>
+              <div class="flex min-h-0 flex-1 items-start p-4">
+                <label class="flex w-full items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3 text-sm text-zinc-300">
+                  <span>Must match at least</span>
+                  <input type="number" min="1" [max]="filter.statIds.length" [value]="filter.minimumAttributeMatches" (input)="setScannerMinimumAttributeMatches($event)" [disabled]="!filter.statIds.length" aria-label="Minimum selected attributes to match" class="rank-input h-8 w-14 rounded-md border border-zinc-700 bg-zinc-900 text-center font-mono font-semibold text-amber-300 outline-none focus:border-amber-500 disabled:cursor-not-allowed disabled:opacity-40">
+                  <span class="min-w-0">selected attribute{{ filter.statIds.length === 1 ? '' : 's' }}.</span>
+                </label>
+              </div>
+            </section>
+            </div>
+
+            <section class="grid min-h-0 grid-cols-2 gap-4">
+              <div class="flex min-h-0 flex-col overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900/30">
+                <div class="shrink-0 border-b border-zinc-800 p-3"><h3 class="mb-2 font-semibold text-zinc-200">Available attributes</h3><input type="search" aria-label="Search available attributes" placeholder="Search available attributes…" [value]="scannerAvailableStatSearch()" (input)="setScannerAvailableStatSearch($event)" class="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-amber-500"></div>
+                <div class="min-h-0 flex-1 space-y-1.5 overflow-y-auto overscroll-contain p-3">
+                  <button type="button" *ngFor="let stat of scannerAvailableStats(); trackBy: trackCodexStat" (click)="addScannerStat(stat)" (pointerenter)="showScannerDisabledTooltip($event, stat)" (pointerleave)="hideTooltips()" [attr.aria-disabled]="scannerStatSelected(stat) || scannerDisabledItems(stat).length > 0" [class]="scannerDisabledItems(stat).length ? 'relative flex w-full cursor-not-allowed items-center gap-2 rounded-lg border border-rose-900 bg-rose-950/40 px-3 py-2 text-left text-sm text-rose-300' : scannerStatSelected(stat) ? 'flex w-full cursor-not-allowed items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-left text-sm text-zinc-300 opacity-30' : 'flex w-full items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-left text-sm text-zinc-300 hover:border-amber-800 hover:bg-zinc-900'">
+                    <span class="min-w-0 flex-1">{{ codexStatText(stat) }}</span>
+                    <span *ngIf="scannerDisabledItems(stat).length" class="relative shrink-0"><i class="fa-solid fa-triangle-exclamation text-rose-400"></i></span>
+                  </button>
+                  <p *ngIf="!scannerAnchorItem()" class="py-8 text-center text-sm text-zinc-600">Select an item to choose its primary type.</p>
+                </div>
+              </div>
+              <div class="flex min-h-0 flex-col overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900/30">
+                <div class="shrink-0 border-b border-zinc-800 p-3"><h3 class="mb-2 font-semibold text-zinc-200">Selected attributes</h3><input type="search" aria-label="Search selected attributes" placeholder="Search selected attributes…" [value]="scannerSelectedStatSearch()" (input)="setScannerSelectedStatSearch($event)" class="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-amber-500"></div>
+                <div class="min-h-0 flex-1 space-y-1.5 overflow-y-auto overscroll-contain p-3">
+                  <div *ngFor="let stat of scannerSelectedStats(); trackBy: trackCodexStat" (contextmenu)="removeScannerStat($event, $any(stat).id)" class="flex w-full items-center gap-2 rounded-lg border border-amber-900/70 bg-amber-950/20 px-3 py-2 text-left text-sm text-zinc-200 hover:bg-rose-950/30" [attr.title]="'Right-click to remove ' + scannerStatTitle(stat)"><span class="min-w-0 flex-1">{{ codexStatText(stat) }}</span><button type="button" (click)="removeScannerStat($event, $any(stat).id)" [attr.aria-label]="'Remove ' + scannerStatTitle(stat)" class="flex h-6 w-6 shrink-0 items-center justify-center rounded text-zinc-600 hover:bg-rose-950 hover:text-rose-300"><i class="fa-solid fa-xmark"></i></button></div>
+                  <p *ngIf="!scannerSelectedStats().length" class="py-8 text-center text-sm text-zinc-600">No required attributes selected.</p>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+      </div>
+
+      <div id="scanner-tooltip" *ngIf="scannerTooltip() as tooltip" role="tooltip" class="pointer-events-none fixed left-0 top-0 z-[80] w-80 rounded-xl border border-zinc-700 bg-zinc-950 p-3 text-left shadow-2xl shadow-black/70 will-change-transform">
+        <ng-container *ngIf="$any(tooltip).kind === 'match'; else scannerNonMatchTooltip">
+          <ng-container *ngIf="$any(tooltip).item as item">
+            <div class="flex items-start gap-3"><div [class]="'h-12 w-12 shrink-0 rounded-lg border p-1.5 ' + rarityIconClass($any(item).rarity)"><img *ngIf="$any(item).iconUrl" [src]="$any(item).iconUrl" class="h-full w-full object-contain" alt=""></div><div><h3 class="font-semibold text-zinc-100">{{ $any(item).englishName || $any(item).name }}</h3><p class="text-xs text-amber-300">{{ $any(item).qualityName || scannerRarityLabel($any(item).rarity) }} · Level {{ $any(item).level ?? '?' }} · {{ $any(item).partName || 'Equipment' }}</p></div></div>
+            <div class="mt-3 grid grid-cols-3 gap-2 border-t border-zinc-800 pt-2 text-[10px] text-zinc-500"><span>Forge <b class="text-zinc-300">+{{ $any(item).forgeLevel ?? 0 }}</b></span><span>Main <b class="text-zinc-300">{{ $any(item).mainAttributeValue ?? 0 }}</b></span><span>Slots <b class="text-zinc-300">{{ $any(item).slotCount ?? 0 }}</b></span></div>
+            <div class="mt-2 space-y-1 border-t border-zinc-800 pt-2"><p *ngFor="let stat of $any(item).affixes; trackBy: trackInventoryAffix" class="whitespace-pre-line text-xs text-zinc-300"><span class="mr-1 text-zinc-600">{{ $any(stat).rank ?? '?' }}</span>{{ inventoryAffixText($any(stat)) }}</p></div>
+            <p class="mt-2 text-[10px] text-zinc-600">Matched {{ $any(item)._matchedFilterIds.length }} enabled filter{{ $any(item)._matchedFilterIds.length === 1 ? '' : 's' }}</p>
+          </ng-container>
+        </ng-container>
+        <ng-template #scannerNonMatchTooltip>
+          <ng-container *ngIf="$any(tooltip).kind === 'disabled'; else scannerAutoTooltip"><strong class="block text-sm text-rose-300">Disabled for item(s):</strong><span class="mt-1 block text-xs text-zinc-300" *ngFor="let item of $any(tooltip).items">{{ $any(item).englishName || $any(item).name }} ({{ scannerRarityLabel($any(item).rarity) }})</span></ng-container>
+          <ng-template #scannerAutoTooltip><p class="text-xs leading-relaxed text-zinc-300">When Auto is enabled, each new item added to the inventory is compared against the enabled filters.</p></ng-template>
+        </ng-template>
       </div>
 
       <div *ngIf="selectedHero() as hero" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" (click)="closeHero()">
@@ -419,7 +537,7 @@ class AppComponent implements OnInit, OnDestroy {
     { key: 'unique', label: 'Unique', quality: 8 },
     { key: 'mythic', label: 'Mythic', quality: 5 }
   ];
-  readonly selectedPageTab = signal<'battles' | 'compendium' | 'codex'>('battles');
+  readonly selectedPageTab = signal<'battles' | 'compendium' | 'codex' | 'scanner'>('battles');
   readonly mapSelectorSlot = signal<number | null>(null);
   readonly mapSearch = signal('');
   readonly selectedAverageMapKeys = signal<string[]>(['standard:Rift-Star Expanse-15', 'standard:Rift-Star Expanse-15', 'standard:Rift-Star Expanse-15']);
@@ -432,6 +550,17 @@ class AppComponent implements OnInit, OnDestroy {
   readonly codexAttributeSearch = signal('');
   readonly codexLoading = signal(false);
   readonly codexError = signal<string | null>(null);
+  readonly scannerFilters = signal<ScannerFilter[]>([]);
+  readonly editingScannerFilterId = signal<string | null>(null);
+  readonly scannerItemSearch = signal('');
+  readonly scannerAvailableStatSearch = signal('');
+  readonly scannerSelectedStatSearch = signal('');
+  readonly scannerScanning = signal(false);
+  readonly scannerHasRun = signal(false);
+  readonly scannerMatches = signal<ScannerMatch[]>([]);
+  readonly scannerError = signal<string | null>(null);
+  readonly scannerAutoEnabled = signal(false);
+  readonly scannerTooltip = signal<{ kind: 'match'; item: ScannerMatch } | { kind: 'disabled'; items: any[] } | { kind: 'auto' } | null>(null);
   readonly catalogs = signal<Record<string, any[]>>({});
   readonly selectedHero = signal<any | null>(null);
   readonly selectedHeroTab = signal<'talents' | 'stats'>('talents');
@@ -486,6 +615,44 @@ class AppComponent implements OnInit, OnDestroy {
     const search = this.codexAttributeSearch().trim().toLocaleLowerCase('en-US');
     return this.selectedCodexStats().filter(stat => !search || `${this.codexStatText(stat)} ${stat?.qualityName || ''}`.toLocaleLowerCase('en-US').includes(search));
   });
+  readonly editingScannerFilter = computed<ScannerFilter | null>(() => this.scannerFilters().find(filter => filter.id === this.editingScannerFilterId()) || null);
+  readonly editingScannerItems = computed<any[]>(() => {
+    const keys = new Set(this.editingScannerFilter()?.itemKeys || []);
+    return this.codexSnapshot().items.filter((item: any) => keys.has(this.codexItemKey(item)));
+  });
+  readonly scannerAnchorItem = computed<any | null>(() => {
+    const key = this.editingScannerFilter()?.anchorItemKey;
+    return key ? this.codexSnapshot().items.find((item: any) => this.codexItemKey(item) === key) || null : null;
+  });
+  readonly scannerPickerItems = computed<any[]>(() => {
+    const search = this.scannerItemSearch().trim().toLocaleLowerCase('en-US');
+    const part = Number(this.scannerAnchorItem()?.part);
+    return this.codexSnapshot().items
+      .filter((item: any) => (!part || Number(item?.part) === part)
+        && (!search || `${item?.englishName || item?.name || ''} ${item?.rarityLabel || item?.rarity || ''} ${item?.partName || ''} ${item?.subtypeName || ''}`.toLocaleLowerCase('en-US').includes(search)))
+      .sort((left: any, right: any) => Number(left?.part) - Number(right?.part) || Number(left?.subtype) - Number(right?.subtype) || Number(left?.sortIndex) - Number(right?.sortIndex) || Number(left?.id) - Number(right?.id));
+  });
+  readonly scannerPrimaryStats = computed<any[]>(() => {
+    const part = Number(this.scannerAnchorItem()?.part);
+    if (!part) return [];
+    const pools = new Map(this.codexSnapshot().affixPools.map(pool => [Number(pool.id), pool.stats || []]));
+    const stats = new Map<number, any>();
+    const anchor = this.scannerAnchorItem();
+    const items = [anchor, ...this.codexSnapshot().items.filter((entry: any) => entry !== anchor && Number(entry?.part) === part)];
+    for (const item of items) {
+      for (const stat of pools.get(Number(item?.affixPoolId)) || []) if (!stats.has(Number(stat?.id))) stats.set(Number(stat?.id), stat);
+    }
+    return [...stats.values()].sort((left: any, right: any) => this.scannerStatTitle(left).localeCompare(this.scannerStatTitle(right), 'en-US', { numeric: true }));
+  });
+  readonly scannerAvailableStats = computed<any[]>(() => {
+    const search = this.scannerAvailableStatSearch().trim().toLocaleLowerCase('en-US');
+    return this.scannerPrimaryStats().filter(stat => !search || `${this.codexStatText(stat)} ${stat?.qualityName || ''}`.toLocaleLowerCase('en-US').includes(search));
+  });
+  readonly scannerSelectedStats = computed<any[]>(() => {
+    const ids = new Set(this.editingScannerFilter()?.statIds || []);
+    const search = this.scannerSelectedStatSearch().trim().toLocaleLowerCase('en-US');
+    return this.scannerPrimaryStats().filter(stat => ids.has(Number(stat?.id)) && (!search || this.codexStatText(stat).toLocaleLowerCase('en-US').includes(search)));
+  });
   readonly combatEffects = computed<any[]>(() => {
     const selected = this.selectedTimelineEntry();
     const hero = this.selectedHero();
@@ -516,6 +683,8 @@ class AppComponent implements OnInit, OnDestroy {
   private activeTooltipId?: string;
   private activeTooltipAnchor?: HTMLElement;
   private catalogRefreshRequested = false;
+  private lastInventoryItemAddedTimestamp: string | null = null;
+  private scannerAudioContext?: AudioContext;
   private destroyed = false;
   private readonly nativePointerMove = (event: PointerEvent) => {
     if (!this.activeTooltipId || !this.activeTooltipAnchor) return;
@@ -539,6 +708,7 @@ class AppComponent implements OnInit, OnDestroy {
       ]);
       this.catalogs.set(catalogs);
       this.state.set({ ...live, catalogs });
+      this.lastInventoryItemAddedTimestamp = live.inventoryItemAdded?.timestamp || null;
       if (live.gameRunning) void this.refreshTalentCatalogIfNeeded();
     } catch { /* server stream will retry */ }
     this.stream = new EventSource('/api/stream');
@@ -548,6 +718,7 @@ class AppComponent implements OnInit, OnDestroy {
       const previousSnapshotTimestamp = this.latestSlotSnapshotTimestamp(this.state());
       const next = { ...JSON.parse(event.data), catalogs: this.catalogs() } as TelemetryState;
       this.state.set(next);
+      this.handleInventoryItemAdded(next.inventoryItemAdded || null);
       if (next.gameRunning) void this.refreshTalentCatalogIfNeeded();
       this.scheduleTooltipAnchorValidation();
       if (this.pendingSnapshot && this.latestSlotSnapshotTimestamp(next) !== this.pendingSnapshot.previousTimestamp) {
@@ -578,14 +749,17 @@ class AppComponent implements OnInit, OnDestroy {
     document.removeEventListener('pointermove', this.nativePointerMove);
     if (this.tooltipFrame) cancelAnimationFrame(this.tooltipFrame);
     if (this.tooltipValidationFrame) cancelAnimationFrame(this.tooltipValidationFrame);
+    void this.scannerAudioContext?.close();
   }
-  selectPageTab(tab: 'battles' | 'compendium' | 'codex') {
+  selectPageTab(tab: 'battles' | 'compendium' | 'codex' | 'scanner') {
     const currentTab = this.selectedPageTab();
     const enteringCodex = tab === 'codex' && currentTab !== 'codex';
+    const enteringScanner = tab === 'scanner' && currentTab !== 'scanner';
     this.hideTooltips();
     this.selectedPageTab.set(tab);
     if (tab !== currentTab && this.pageTabBody) this.pageTabBody.nativeElement.scrollTop = 0;
     if (enteringCodex) void this.refreshCodex();
+    if (enteringScanner) void this.ensureScannerCodex();
   }
   toggleMapSelector(event: Event, slot: number) {
     event.preventDefault();
@@ -685,6 +859,248 @@ class AppComponent implements OnInit, OnDestroy {
     if (/\{[^}]+\}/.test(english)) return english.replace(/\{[^}]+\}/, range.replace(/~/g, '-')).replace(/\s*\{[^}]+\}/g, '');
     return `${english} ${range.replace(/~/g, '-')}`.trim();
   }
+  rarityIconClass(rarity: unknown): string {
+    switch (String(rarity || '').toLocaleLowerCase('en-US')) {
+      case 'rare': return 'border-yellow-500/70 bg-yellow-950/70';
+      case 'legendary': return 'border-orange-500/70 bg-orange-950/70';
+      case 'set': return 'border-emerald-500/70 bg-emerald-950/70';
+      case 'unique': return 'border-cyan-400/70 bg-cyan-950/70';
+      case 'mythic': return 'border-red-500/70 bg-red-950/70';
+      default: return 'border-zinc-700 bg-zinc-900';
+    }
+  }
+  scannerRarityLabel(rarity: unknown): string {
+    const key = String(rarity || '').toLocaleLowerCase('en-US');
+    return this.codexRarities.find(entry => entry.key === key)?.label || key || 'Unknown';
+  }
+  scannerPrimaryTypeLabel(): string {
+    const item = this.scannerAnchorItem();
+    return item ? `${item?.partName || 'Equipment'} items only` : 'Select the first item to choose a primary type';
+  }
+  scannerItemSelected(item: any): boolean { return !!this.editingScannerFilter()?.itemKeys.includes(this.codexItemKey(item)); }
+  scannerStatSelected(stat: any): boolean { return !!this.editingScannerFilter()?.statIds.includes(Number(stat?.id)); }
+  scannerStatTitle(stat: any): string {
+    const text = this.codexStatText(stat);
+    return text.replace(/\s+[+-](?=\(?\d).*$/, '').trim() || text;
+  }
+  scannerDisabledItems(stat: any): any[] {
+    const statId = Number(stat?.id);
+    const poolStats = new Map(this.codexSnapshot().affixPools.map(pool => [Number(pool.id), new Set((pool.stats || []).map(entry => Number(entry?.id))) ]));
+    return this.editingScannerItems().filter((item: any) => this.isCodexStatExcluded(item, stat) || !poolStats.get(Number(item?.affixPoolId))?.has(statId));
+  }
+  scannerFilterItems(filter: ScannerFilter): any[] {
+    const keys = new Set(filter.itemKeys);
+    return this.codexSnapshot().items.filter((item: any) => keys.has(this.codexItemKey(item)));
+  }
+  scannerFilterStats(filter: ScannerFilter): any[] {
+    const ids = new Set(filter.statIds);
+    const stats = new Map<number, any>();
+    const anchor = this.codexSnapshot().items.find((item: any) => this.codexItemKey(item) === filter.anchorItemKey);
+    const orderedPools = [
+      ...this.codexSnapshot().affixPools.filter(pool => Number(pool.id) === Number(anchor?.affixPoolId)),
+      ...this.codexSnapshot().affixPools.filter(pool => Number(pool.id) !== Number(anchor?.affixPoolId))
+    ];
+    for (const pool of orderedPools) for (const stat of pool.stats || []) if (ids.has(Number(stat?.id)) && !stats.has(Number(stat?.id))) stats.set(Number(stat?.id), stat);
+    return [...stats.values()];
+  }
+  trackScannerFilter(_index: number, filter: ScannerFilter): string { return filter.id; }
+  trackScannerMatch(_index: number, item: ScannerMatch): string { return `${item?.inventoryIndex ?? 'unknown'}:${item?.rarity}:${item?.id}`; }
+  trackInventoryAffix(_index: number, stat: any): string { return `${stat?.id ?? 'unknown'}:${stat?.rank ?? 'unknown'}:${_index}`; }
+  inventoryAffixText(stat: any): string { return this.plainGameText(stat?.displayDescription || stat?.englishDescription || stat?.description || 'Unknown attribute'); }
+  hasRunnableScannerFilters(): boolean { return this.scannerFilters().some(filter => filter.enabled && filter.itemKeys.length > 0); }
+  async createScannerFilter() {
+    await this.ensureScannerCodex();
+    if (!this.codexSnapshot().items.length) return;
+    const filter: ScannerFilter = { id: this.newScannerFilterId(), enabled: true, itemKeys: [], anchorItemKey: null, statIds: [], minimumAttributeMatches: 1 };
+    this.scannerFilters.update(filters => [...filters, filter]);
+    this.invalidateScannerResults();
+    this.saveScannerFilters();
+    this.editScannerFilter(filter.id);
+  }
+  editScannerFilter(id: string) {
+    if (!this.scannerFilters().some(filter => filter.id === id)) return;
+    this.scannerItemSearch.set('');
+    this.scannerAvailableStatSearch.set('');
+    this.scannerSelectedStatSearch.set('');
+    this.editingScannerFilterId.set(id);
+    this.hideTooltips();
+  }
+  closeScannerFilter() { this.editingScannerFilterId.set(null); }
+  deleteScannerFilter(id: string) {
+    this.scannerFilters.update(filters => filters.filter(filter => filter.id !== id));
+    if (this.editingScannerFilterId() === id) this.closeScannerFilter();
+    this.invalidateScannerResults();
+    this.saveScannerFilters();
+  }
+  setScannerFilterEnabled(id: string, event: Event) {
+    const enabled = (event.target as HTMLInputElement).checked;
+    this.updateScannerFilter(id, filter => ({ ...filter, enabled }));
+  }
+  setScannerItemSearch(event: Event) { this.scannerItemSearch.set((event.target as HTMLInputElement).value); }
+  setScannerAvailableStatSearch(event: Event) { this.scannerAvailableStatSearch.set((event.target as HTMLInputElement).value); }
+  setScannerSelectedStatSearch(event: Event) { this.scannerSelectedStatSearch.set((event.target as HTMLInputElement).value); }
+  setScannerAutoEnabled(event: Event) {
+    const enabled = (event.target as HTMLInputElement).checked;
+    this.scannerAutoEnabled.set(enabled);
+    this.writeLocalStorage('path-of-idle-stats.scanner.auto', String(enabled));
+    this.lastInventoryItemAddedTimestamp = this.state().inventoryItemAdded?.timestamp || null;
+    if (enabled) this.prepareScannerSound();
+  }
+  setScannerMinimumAttributeMatches(event: Event) {
+    const current = this.editingScannerFilter();
+    if (!current) return;
+    const value = (event.target as HTMLInputElement).valueAsNumber;
+    this.updateScannerFilter(current.id, filter => ({ ...filter, minimumAttributeMatches: value }));
+  }
+  toggleScannerItem(item: any) {
+    const current = this.editingScannerFilter();
+    if (!current) return;
+    const key = this.codexItemKey(item);
+    if (current.itemKeys.includes(key)) { this.removeScannerItemByKey(key); return; }
+    let itemKeys = current.itemKeys;
+    let anchorItemKey = current.anchorItemKey;
+    if (!anchorItemKey) {
+      const part = Number(item?.part);
+      const compatible = new Set(this.codexSnapshot().items.filter((entry: any) => Number(entry?.part) === part).map((entry: any) => this.codexItemKey(entry)));
+      itemKeys = itemKeys.filter(existing => compatible.has(existing));
+      anchorItemKey = key;
+    }
+    this.updateScannerFilter(current.id, filter => ({ ...filter, anchorItemKey, itemKeys: [...filter.itemKeys.filter(existing => itemKeys.includes(existing)), key] }));
+    this.pruneScannerStats(current.id);
+  }
+  removeScannerPickerItem(event: Event, item: any) {
+    const key = this.codexItemKey(item);
+    if (!this.editingScannerFilter()?.itemKeys.includes(key)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    this.removeScannerItemByKey(key);
+  }
+  private removeScannerItemByKey(key: string) {
+    const current = this.editingScannerFilter();
+    if (!current) return;
+    this.updateScannerFilter(current.id, filter => ({ ...filter, itemKeys: filter.itemKeys.filter(itemKey => itemKey !== key), anchorItemKey: filter.anchorItemKey === key ? null : filter.anchorItemKey }));
+  }
+  addScannerStat(stat: any) {
+    const current = this.editingScannerFilter();
+    const id = Number(stat?.id);
+    if (!current || !Number.isFinite(id) || current.statIds.includes(id) || this.scannerDisabledItems(stat).length) return;
+    this.updateScannerFilter(current.id, filter => ({ ...filter, statIds: [...filter.statIds, id] }));
+  }
+  removeScannerStat(event: Event, id: number) {
+    event.preventDefault();
+    event.stopPropagation();
+    const current = this.editingScannerFilter();
+    if (current) this.updateScannerFilter(current.id, filter => ({ ...filter, statIds: filter.statIds.filter(statId => statId !== Number(id)) }));
+  }
+  async scanInventory() {
+    if (this.scannerScanning() || !this.hasRunnableScannerFilters()) return;
+    this.prepareScannerSound();
+    this.scannerScanning.set(true);
+    this.scannerError.set(null);
+    const previousTimestamp = this.state().inventoryUpdatedAt || null;
+    try {
+      const request = await fetch('/api/inventory/refresh', { method: 'POST' });
+      if (!request.ok) throw new Error('The backend rejected the inventory request.');
+      let live: TelemetryState | null = null;
+      for (let attempt = 0; attempt < 60 && !this.destroyed; attempt++) {
+        await new Promise(resolve => window.setTimeout(resolve, 250));
+        const candidate = await fetch('/api/state').then(response => response.json()) as TelemetryState;
+        if (candidate.inventoryUpdatedAt && candidate.inventoryUpdatedAt !== previousTimestamp) { live = candidate; break; }
+      }
+      if (!live) throw new Error('The game did not return the inventory in time.');
+      this.state.set({ ...live, catalogs: this.catalogs() });
+      const enabled = this.scannerFilters().filter(filter => filter.enabled && filter.itemKeys.length);
+      const matches = new Map<string, ScannerMatch>();
+      for (const item of (live.inventory || []) as any[]) {
+        const matching = this.matchingScannerFilters(item, enabled);
+        if (!matching.length) continue;
+        const key = `${item?.inventoryIndex ?? 'unknown'}:${this.codexItemKey(item)}`;
+        matches.set(key, { ...item, _matchedFilterIds: matching.map(filter => filter.id) });
+      }
+      this.scannerMatches.set([...matches.values()]);
+      this.scannerHasRun.set(true);
+      if (matches.size) this.playScannerMatchSound();
+    } catch (error) {
+      this.scannerError.set(error instanceof Error ? error.message : 'Inventory scan failed.');
+    } finally { this.scannerScanning.set(false); }
+  }
+  private async ensureScannerCodex() {
+    if (this.codexSnapshot().items.length) return;
+    await this.refreshCodex();
+    if (!this.codexSnapshot().items.length && !this.codexError()) this.scannerError.set('The game returned no Codex item definitions.');
+  }
+  private matchingScannerFilters(item: any, candidates = this.scannerFilters().filter(filter => filter.enabled && filter.itemKeys.length)): ScannerFilter[] {
+    const itemKey = this.codexItemKey(item);
+    const affixIds = new Set((Array.isArray(item?.affixes) ? item.affixes : []).map((affix: any) => Number(affix?.id)));
+    return candidates.filter(filter => {
+      if (!filter.itemKeys.includes(itemKey)) return false;
+      if (!filter.statIds.length) return true;
+      const matchedAttributeCount = filter.statIds.reduce((count, id) => count + (affixIds.has(Number(id)) ? 1 : 0), 0);
+      return matchedAttributeCount >= filter.minimumAttributeMatches;
+    });
+  }
+  private handleInventoryItemAdded(event: TelemetryEvent | null) {
+    const timestamp = event?.timestamp || null;
+    if (!timestamp || timestamp === this.lastInventoryItemAddedTimestamp) return;
+    this.lastInventoryItemAddedTimestamp = timestamp;
+    if (!this.scannerAutoEnabled()) return;
+    const item = (event?.payload as any)?.item;
+    if (!item) return;
+    const matching = this.matchingScannerFilters(item);
+    if (!matching.length) return;
+    const match: ScannerMatch = { ...item, _matchedFilterIds: matching.map(filter => filter.id) };
+    const key = `${item?.inventoryIndex ?? timestamp}:${this.codexItemKey(item)}`;
+    this.scannerMatches.update(items => [match, ...items.filter(existing => `${existing?.inventoryIndex ?? 'unknown'}:${this.codexItemKey(existing)}` !== key)]);
+    this.scannerHasRun.set(true);
+    this.playScannerMatchSound();
+  }
+  private prepareScannerSound(): AudioContext | undefined {
+    const AudioContextConstructor = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioContextConstructor) return undefined;
+    this.scannerAudioContext ??= new AudioContextConstructor();
+    if (this.scannerAudioContext.state === 'suspended') void this.scannerAudioContext.resume().catch(() => undefined);
+    return this.scannerAudioContext;
+  }
+  private playScannerMatchSound() {
+    const context = this.prepareScannerSound();
+    if (!context) return;
+    const play = () => {
+      const baseTime = context.currentTime + 0.015;
+      for (const [index, frequency] of [659.25, 783.99].entries()) {
+        const start = baseTime + index * 0.075;
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+        oscillator.type = 'sine';
+        oscillator.frequency.setValueAtTime(frequency, start);
+        gain.gain.setValueAtTime(0.0001, start);
+        gain.gain.exponentialRampToValueAtTime(0.055, start + 0.018);
+        gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.28);
+        oscillator.connect(gain).connect(context.destination);
+        oscillator.start(start);
+        oscillator.stop(start + 0.3);
+      }
+    };
+    if (context.state === 'running') play(); else void context.resume().then(play).catch(() => undefined);
+  }
+  private codexItemKey(item: any): string { return String(item?.key || `${item?.rarity}:${item?.id}`); }
+  private newScannerFilterId(): string { return `filter-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`; }
+  private updateScannerFilter(id: string, update: (filter: ScannerFilter) => ScannerFilter) {
+    this.scannerFilters.update(filters => filters.map(filter => filter.id === id ? this.normalizeScannerFilter(update(filter)) : filter));
+    this.invalidateScannerResults();
+    this.saveScannerFilters();
+  }
+  private pruneScannerStats(id: string) {
+    const allowed = new Set(this.scannerPrimaryStats().map(stat => Number(stat?.id)));
+    this.updateScannerFilter(id, filter => ({ ...filter, statIds: filter.statIds.filter(statId => allowed.has(statId)) }));
+  }
+  private saveScannerFilters() { this.writeLocalStorage('path-of-idle-stats.scanner.filters', JSON.stringify(this.scannerFilters())); }
+  private normalizeScannerFilter(filter: ScannerFilter): ScannerFilter {
+    const selectedCount = filter.statIds.length;
+    const requested = Number(filter.minimumAttributeMatches);
+    const minimumAttributeMatches = selectedCount ? Math.max(1, Math.min(selectedCount, Number.isFinite(requested) ? Math.round(requested) : selectedCount)) : 1;
+    return { ...filter, minimumAttributeMatches };
+  }
+  private invalidateScannerResults() { this.scannerHasRun.set(false); this.scannerMatches.set([]); this.scannerError.set(null); }
   async refreshCodex() {
     if (this.codexLoading()) return;
     if (!this.state().gameRunning) { this.codexError.set('Start the game and enter your save before refreshing the Codex.'); return; }
@@ -737,6 +1153,22 @@ class AppComponent implements OnInit, OnDestroy {
         this.selectedCodexRarity.set(storedCodexRarity);
       }
       this.codexAttributeSearch.set(window.localStorage.getItem('path-of-idle-stats.codex.attribute-search') || '');
+      this.scannerAutoEnabled.set(window.localStorage.getItem('path-of-idle-stats.scanner.auto') === 'true');
+      const storedScannerFilters = JSON.parse(window.localStorage.getItem('path-of-idle-stats.scanner.filters') || '[]');
+      if (Array.isArray(storedScannerFilters)) {
+        this.scannerFilters.set(storedScannerFilters.filter(filter => filter && typeof filter.id === 'string').map(filter => {
+          const statIds = Array.isArray(filter.statIds) ? filter.statIds.map(Number).filter(Number.isFinite) : [];
+          const storedMinimum = Number(filter.minimumAttributeMatches);
+          return this.normalizeScannerFilter({
+            id: filter.id,
+            enabled: filter.enabled !== false,
+            itemKeys: Array.isArray(filter.itemKeys) ? filter.itemKeys.map(String) : [],
+            anchorItemKey: typeof filter.anchorItemKey === 'string' ? filter.anchorItemKey : null,
+            statIds,
+            minimumAttributeMatches: Number.isFinite(storedMinimum) ? storedMinimum : Math.max(1, statIds.length)
+          });
+        }));
+      }
       this.selectedAverageMapKeys.set(this.battleSlots.map(slot => this.normalizeAverageMapKey(window.localStorage.getItem(`path-of-idle-stats.battles.average-map.${slot}`))));
     } catch { /* localStorage can be unavailable in privacy-restricted contexts */ }
   }
@@ -1072,16 +1504,33 @@ class AppComponent implements OnInit, OnDestroy {
     if (!response.ok) throw new Error('Could not reset battle history');
   }
   showEffectTooltip(event: PointerEvent, effect: any) {
-    this.hoveredTalent.set(null); this.hoveredStat.set(null); this.hoveredEffect.set(effect);
+    this.hoveredTalent.set(null); this.hoveredStat.set(null); this.scannerTooltip.set(null); this.hoveredEffect.set(effect);
     this.activateTooltip(event, 'effect-tooltip');
   }
   showStatTooltip(event: PointerEvent, stat: any) {
-    this.hoveredTalent.set(null); this.hoveredEffect.set(null); this.hoveredStat.set(stat);
+    this.hoveredTalent.set(null); this.hoveredEffect.set(null); this.scannerTooltip.set(null); this.hoveredStat.set(stat);
     this.activateTooltip(event, 'stat-tooltip');
   }
   showTalentTooltip(event: PointerEvent, talent: any) {
-    this.hoveredStat.set(null); this.hoveredEffect.set(null); this.hoveredTalent.set(talent);
+    this.hoveredStat.set(null); this.hoveredEffect.set(null); this.scannerTooltip.set(null); this.hoveredTalent.set(talent);
     this.activateTooltip(event, 'talent-tooltip');
+  }
+  showScannerMatchTooltip(event: PointerEvent, item: ScannerMatch) {
+    this.hoveredTalent.set(null); this.hoveredStat.set(null); this.hoveredEffect.set(null);
+    this.scannerTooltip.set({ kind: 'match', item });
+    this.activateTooltip(event, 'scanner-tooltip');
+  }
+  showScannerDisabledTooltip(event: PointerEvent, stat: any) {
+    const items = this.scannerDisabledItems(stat);
+    if (!items.length) return;
+    this.hoveredTalent.set(null); this.hoveredStat.set(null); this.hoveredEffect.set(null);
+    this.scannerTooltip.set({ kind: 'disabled', items });
+    this.activateTooltip(event, 'scanner-tooltip');
+  }
+  showScannerAutoTooltip(event: PointerEvent) {
+    this.hoveredTalent.set(null); this.hoveredStat.set(null); this.hoveredEffect.set(null);
+    this.scannerTooltip.set({ kind: 'auto' });
+    this.activateTooltip(event, 'scanner-tooltip');
   }
   @HostListener('document:click')
   closeMapSelector() { this.mapSelectorSlot.set(null); this.mapSearch.set(''); }
@@ -1094,7 +1543,7 @@ class AppComponent implements OnInit, OnDestroy {
     if (this.tooltipValidationFrame) cancelAnimationFrame(this.tooltipValidationFrame);
     this.tooltipFrame = undefined; this.tooltipValidationFrame = undefined;
     this.activeTooltipId = undefined; this.activeTooltipAnchor = undefined;
-    this.hoveredTalent.set(null); this.hoveredStat.set(null); this.hoveredEffect.set(null);
+    this.hoveredTalent.set(null); this.hoveredStat.set(null); this.hoveredEffect.set(null); this.scannerTooltip.set(null);
   }
   private activateTooltip(event: PointerEvent, elementId: string) {
     this.activeTooltipAnchor = event.currentTarget instanceof HTMLElement ? event.currentTarget : undefined;

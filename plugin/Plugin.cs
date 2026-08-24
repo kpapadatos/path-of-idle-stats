@@ -23,7 +23,7 @@ public sealed class Plugin : BasePlugin
 {
     public const string PluginGuid = "local.pathofidle.stats";
     public const string PluginName = "Path of Idle Stats";
-    public const string PluginVersion = "0.6.11";
+    public const string PluginVersion = "0.7.1";
 
     private static Plugin? Instance;
     private static readonly object StateLock = new();
@@ -55,6 +55,7 @@ public sealed class Plugin : BasePlugin
         PatchWithContext("TriggerResultData", "DoAbility", nameof(AbilityResultPrefix), nameof(AbilityResultFinalizer));
         Patch("ComAbilityData", "AddAbility", nameof(AbilityAddedPostfix));
         Patch("AbilityData", "Remove", nameof(AbilityRemovedPrefix));
+        Patch("LordBagData", "addItemToBag", nameof(InventoryItemAddedPostfix));
         writer.Enqueue("heartbeat", new { pluginVersion = PluginVersion, mode = "live" });
         Log.LogInfo($"{PluginName} {PluginVersion} loaded with read-only telemetry hooks.");
     }
@@ -99,6 +100,13 @@ public sealed class Plugin : BasePlugin
         {
             File.Delete(codexRequestPath);
             EmitCodexSnapshot();
+        }
+
+        var inventoryRequestPath = Path.Combine(telemetryDirectory, "inventory.request");
+        if (File.Exists(inventoryRequestPath) && IsSaveDataReady())
+        {
+            File.Delete(inventoryRequestPath);
+            EmitInventorySnapshot();
         }
 
         var autoRequestPath = Path.Combine(telemetryDirectory, "auto.request");
@@ -465,6 +473,42 @@ public sealed class Plugin : BasePlugin
             }).ToList()
         });
     }
+
+    private static void EmitInventorySnapshot()
+    {
+        var dataMgr = ReadStatic("Game", "dataMgr");
+        var lordData = Read(Read(dataMgr, "nowSeasonData"), "lordData");
+        var bagData = Read(lordData, "lordBagData");
+        var itemType = GameType("EItemType");
+        var equipType = itemType is null ? null : Enum.ToObject(itemType, 2);
+        // GetFieldList(equip) reads the live inventory collection regardless of which
+        // bag page the player currently has open. It does not switch UI state or
+        // mutate/save anything.
+        var inventoryFields = equipType is null ? null : InvokeInstance(bagData!, "GetFieldList", equipType);
+        var fieldEntries = ReadList(inventoryFields).ToList();
+        var items = new List<Dictionary<string, object?>>();
+        foreach (var (field, fallbackIndex) in fieldEntries.Select((field, index) => (field, index)))
+        {
+            var item = Read(field, "itemData");
+            if (item is null) continue;
+            var described = DescribeItem(item);
+            described["inventoryIndex"] = ReadNullableInt(Read(field, "saveItemFieldData"), "index") ?? fallbackIndex;
+            items.Add(described);
+        }
+        ExportPendingIcons(256);
+        Instance?.writer?.Enqueue("snapshot.inventory", new { source = "inventory", items });
+    }
+
+    private static void InventoryItemAddedPostfix(object __0, bool __result) => SafeHook("inventory-item-added", () =>
+    {
+        if (!__result) return;
+        var save = Read(__0, "saveItemData");
+        if (!string.Equals(Read(save, "type")?.ToString(), "equip", StringComparison.OrdinalIgnoreCase)) return;
+        var item = DescribeItem(__0);
+        item["inventoryIndex"] = ReadNullableInt(__0, "fieldIndex");
+        ExportPendingIcons(16);
+        Instance?.writer?.Enqueue("inventory.item-added", new { item });
+    });
 
     private static List<object> ReadSavedCodexItems()
     {
@@ -1046,19 +1090,49 @@ public sealed class Plugin : BasePlugin
         var icon = ReadString(item, "iconStr") ?? ReadString(definition, "icon")
             ?? ReadString(Read(item, "itemRuneData"), "icon") ?? ReadString(Read(item, "itemResData"), "icon");
         QueueIcon(icon);
+        var partId = ReadNullableInt(definition, "part");
+        var subtypeId = ReadNullableInt(definition, "minType");
+        var part = partId is > 0 ? InvokeStatic("TableData", "getTEquipPartData", partId.Value) : null;
+        var subtype = subtypeId is > 0 ? InvokeStatic("TableData", "getTWeaponTypeData", subtypeId.Value) : null;
+        var quality = ReadNullableInt(save, "quality");
+        var affixes = ReadList(Read(equip, "affixList")).Select(DescribeInventoryAffix).ToList();
+        if (affixes.Count == 0) affixes = ReadList(Read(save, "affixList")).Select(DescribeInventoryAffix).ToList();
         return new()
         {
             ["id"] = ReadNullableInt(save, "id"),
             ["name"] = specificName,
             ["englishName"] = EnglishName(definition, specificName),
             ["type"] = Read(save, "type")?.ToString(), ["count"] = ReadNullableInt(save, "count"),
-            ["quality"] = ReadNullableInt(save, "quality"), ["qualityName"] = ReadString(Read(item, "tItemQualityData"), "name"),
+            ["quality"] = quality, ["qualityName"] = EnglishName(Read(item, "tItemQualityData"), ReadString(Read(item, "tItemQualityData"), "name")),
+            ["rarity"] = quality switch { 3 => "rare", 4 => "legendary", 5 => "mythic", 6 => "set", 8 => "unique", _ => "other" },
             ["level"] = ReadNullableInt(save, "level"), ["forgeLevel"] = ReadNullableInt(save, "forgeLevel"),
             ["slotCount"] = ReadNullableInt(save, "slotCount"), ["mainAttributeValue"] = ReadNullableInt(save, "mainAttrValue"),
             ["position"] = Read(item, "posType")?.ToString(),
+            ["part"] = partId, ["partName"] = EnglishName(part, ReadString(part, "name")),
+            ["subtype"] = subtypeId, ["subtypeName"] = partId == 1 ? ReadString(subtype, "name_en") ?? EnglishName(subtype, ReadString(subtype, "name")) : null,
             ["iconKey"] = icon, ["iconUrl"] = IconUrl(icon),
-            ["affixes"] = ReadList(Read(save, "affixList")).Select(DescribeSimpleObject).ToList(),
+            ["affixes"] = affixes,
             ["runes"] = ReadList(Read(save, "slotRuneList")).Select(DescribeSimpleObject).ToList()
+        };
+    }
+
+    private static Dictionary<string, object?> DescribeInventoryAffix(object affix)
+    {
+        var save = Read(affix, "saveData") ?? affix;
+        var id = ReadNullableInt(save, "id") ?? ReadNullableInt(affix, "id");
+        var definition = Read(affix, "tAffixData") ?? (id is > 0 ? InvokeStatic("TableData", "getTAffixData", id.Value) : null);
+        var quality = Read(affix, "tAffixQualityData");
+        var rawDescription = ReadString(definition, "des");
+        return new()
+        {
+            ["id"] = id,
+            ["rank"] = ReadNullableInt(save, "level"),
+            ["quality"] = ReadNullableInt(save, "quality"),
+            ["qualityName"] = EnglishName(quality, ReadString(quality, "name")),
+            ["value"] = ReadNullableInt(save, "value"),
+            ["description"] = rawDescription,
+            ["englishDescription"] = EnglishText(definition, "_des", rawDescription),
+            ["displayDescription"] = InvokeString(affix, "GetDesc")
         };
     }
 

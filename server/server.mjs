@@ -11,8 +11,9 @@ const iconRoot = join(root, 'data', 'icons');
 const snapshotRequest = 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\PathOfIdle\\BepInEx\\PathOfIdleStats\\snapshot.request';
 const catalogRequest = 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\PathOfIdle\\BepInEx\\PathOfIdleStats\\catalog.request';
 const codexRequest = 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\PathOfIdle\\BepInEx\\PathOfIdleStats\\codex.request';
+const inventoryRequest = 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\PathOfIdle\\BepInEx\\PathOfIdleStats\\inventory.request';
 const clients = new Set();
-const state = { connected: false, gameRunning: false, updatedAt: null, snapshotUpdatedAt: null, heroes: [], slots: [], resources: [], sanctum: null, inventory: [], battles: [], events: [], catalogs: {} };
+const state = { connected: false, gameRunning: false, updatedAt: null, snapshotUpdatedAt: null, inventoryUpdatedAt: null, inventoryItemAdded: null, heroes: [], slots: [], resources: [], sanctum: null, inventory: [], battles: [], events: [], catalogs: {} };
 let codexSnapshot = { updatedAt: null, items: [], affixPools: [], rarities: [] };
 let lastGameHeartbeat = 0;
 await mkdir(dataDirectory, { recursive: true });
@@ -35,7 +36,11 @@ function applyEvent(event) {
     state.resources = event.payload?.resources ?? [];
     state.sanctum = event.payload?.sanctum ?? state.sanctum;
   }
-  if (event.type === 'snapshot.inventory') state.inventory = event.payload?.items ?? event.payload ?? [];
+  if (event.type === 'snapshot.inventory') {
+    state.inventory = event.payload?.items ?? event.payload ?? [];
+    state.inventoryUpdatedAt = event.timestamp;
+  }
+  if (event.type === 'inventory.item-added') state.inventoryItemAdded = event;
   if (event.type === 'snapshot.codex') codexSnapshot = { updatedAt: event.timestamp, ...(event.payload ?? {}) };
   if (event.type.startsWith('catalog.')) state.catalogs[event.type.slice(8)] = event.payload?.entries ?? [];
   if (event.type === 'battle.ended') {
@@ -50,8 +55,6 @@ function applyEvent(event) {
       perSlot.set(slot, count + 1);
       return true;
     });
-    const loot = event.payload?.loot ?? [];
-    state.inventory = [...loot, ...state.inventory].slice(0, 100);
   }
   const message = `data: ${JSON.stringify(publicState())}\n\n`;
   for (const client of clients) client.write(message);
@@ -99,6 +102,11 @@ const server = createServer(async (request, response) => {
     if (request.method === 'POST' && url.pathname === '/api/codex/refresh') {
       await mkdir(dirname(codexRequest), { recursive: true });
       await writeFile(codexRequest, new Date().toISOString(), 'utf8');
+      return json(response, 202, { requested: true });
+    }
+    if (request.method === 'POST' && url.pathname === '/api/inventory/refresh') {
+      await mkdir(dirname(inventoryRequest), { recursive: true });
+      await writeFile(inventoryRequest, new Date().toISOString(), 'utf8');
       return json(response, 202, { requested: true });
     }
     if (request.method === 'POST' && url.pathname === '/api/snapshot') {
