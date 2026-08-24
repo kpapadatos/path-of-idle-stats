@@ -442,8 +442,8 @@ type TelemetryState = {
           </header>
 
           <nav class="mt-5 flex shrink-0 gap-1 border-b border-zinc-800" role="tablist" aria-label="Hero details">
-            <button type="button" role="tab" (click)="selectHeroTab('talents')" [attr.aria-selected]="selectedHeroTab() === 'talents'" class="border-b-2 px-4 py-2 text-sm font-medium" [class]="selectedHeroTab() === 'talents' ? 'border-amber-400 text-amber-300' : 'border-transparent text-zinc-500 hover:text-zinc-300'">Talents</button>
             <button type="button" role="tab" (click)="selectHeroTab('stats')" [attr.aria-selected]="selectedHeroTab() === 'stats'" class="border-b-2 px-4 py-2 text-sm font-medium" [class]="selectedHeroTab() === 'stats' ? 'border-amber-400 text-amber-300' : 'border-transparent text-zinc-500 hover:text-zinc-300'">Stats</button>
+            <button type="button" role="tab" (click)="selectHeroTab('talents')" [attr.aria-selected]="selectedHeroTab() === 'talents'" class="border-b-2 px-4 py-2 text-sm font-medium" [class]="selectedHeroTab() === 'talents' ? 'border-amber-400 text-amber-300' : 'border-transparent text-zinc-500 hover:text-zinc-300'">Talents</button>
           </nav>
 
           <div class="min-h-0 flex-1 overflow-y-auto pr-1">
@@ -497,8 +497,8 @@ type TelemetryState = {
               </div>
             </section>
             <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
-              <div class="flex min-w-0 flex-1 flex-wrap items-center gap-x-1 gap-y-1.5">
-                <button *ngFor="let effect of combatEffects(); trackBy: trackEffect" type="button" [attr.data-effect-key]="effectKey($any(effect))" (pointerenter)="showEffectTooltip($event, $any(effect))" (pointerleave)="hideTooltips()" class="relative h-[35px] w-[35px] rounded-lg border bg-zinc-950 p-1" [class]="effectBorderClass($any(effect))" [attr.aria-label]="effectTitle($any(effect))">
+              <div class="flex min-w-0 flex-1 flex-wrap items-center gap-x-[3px] gap-y-[5px]">
+                <button *ngFor="let effect of combatEffects(); trackBy: trackEffect" type="button" [attr.data-effect-key]="effectKey($any(effect))" (pointerenter)="showEffectTooltip($event, $any(effect))" (pointerleave)="hideTooltips()" class="relative h-[34px] w-[34px] rounded-lg border bg-zinc-950 p-1" [class]="effectBorderClass($any(effect))" [attr.aria-label]="effectTitle($any(effect))">
                   <img *ngIf="effectIconUrl($any(effect)) as effectIcon" [src]="effectIcon" class="h-full w-full object-contain" alt="">
                   <span *ngIf="$any(effect).stacks > 1" class="absolute -bottom-1.5 -right-1.5 min-w-4 rounded-full border border-zinc-700 bg-zinc-950 px-1 text-center text-[9px] font-bold text-zinc-100">{{ $any(effect).stacks }}</span>
                 </button>
@@ -657,7 +657,7 @@ class AppComponent implements OnInit, OnDestroy {
   readonly scannerTooltip = signal<{ kind: 'match'; item: ScannerMatch } | { kind: 'disabled'; items: any[] } | { kind: 'auto' } | null>(null);
   readonly catalogs = signal<Record<string, any[]>>({});
   readonly selectedHero = signal<any | null>(null);
-  readonly selectedHeroTab = signal<'talents' | 'stats'>('talents');
+  readonly selectedHeroTab = signal<'talents' | 'stats'>('stats');
   readonly currentHeroDataView = signal<'stats' | 'damage'>('stats');
   readonly hoveredTalent = signal<any | null>(null);
   readonly hoveredStat = signal<any | null>(null);
@@ -1886,7 +1886,7 @@ class AppComponent implements OnInit, OnDestroy {
     return battle?.timestamp ?? null;
   }
   battleResultClass(result: unknown) { return String(result).toLowerCase().includes('win') ? 'bg-emerald-950 text-emerald-300' : 'bg-rose-950 text-rose-300'; }
-  openHero(hero: any) { this.stopRecording(); this.clearTimeline(); this.currentHeroDataView.set('stats'); this.selectedHero.set(hero); this.selectedHeroTab.set('talents'); }
+  openHero(hero: any) { this.stopRecording(); this.clearTimeline(); this.currentHeroDataView.set('stats'); this.selectedHero.set(hero); this.selectedHeroTab.set('stats'); }
   selectHeroTab(tab: 'talents' | 'stats') { this.hideTooltips(); this.selectedHeroTab.set(tab); }
   closeHero() { this.stopRecording(); this.selectedHero.set(null); this.hideTooltips(); }
   async resetSlot(slot: number) {
