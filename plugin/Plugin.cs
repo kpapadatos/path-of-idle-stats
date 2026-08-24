@@ -23,7 +23,7 @@ public sealed class Plugin : BasePlugin
 {
     public const string PluginGuid = "local.pathofidle.stats";
     public const string PluginName = "Path of Idle Stats";
-    public const string PluginVersion = "0.7.2";
+    public const string PluginVersion = "0.7.3";
 
     private static Plugin? Instance;
     private static readonly object StateLock = new();
@@ -340,12 +340,14 @@ public sealed class Plugin : BasePlugin
         {
             var saveField = Read(field, "saveAdvFieldData");
             var index = ReadNullableInt(saveField, "index") ?? fallbackIndex;
+            var tallyData = Read(field, "advTallyData");
+            var observedBattleTime = GetObservedBattleTime(index);
             var combats = ReadList(Read(Read(field, "advBattleData"), "comPlayerList")).ToList();
             var heroes = ReadList(Read(field, "heroFieldList"))
                 .Select(heroField => Read(heroField, "heroData"))
                 .Where(hero => hero is not null)
                 .Select(hero => DescribeHero(hero!, combats.FirstOrDefault(combat =>
-                    NativePointer(Read(combat, "heroData") ?? combat) == NativePointer(hero!))))
+                    NativePointer(Read(combat, "heroData") ?? combat) == NativePointer(hero!)), tallyData, observedBattleTime))
                 .ToList();
             return new { battleIndex = index, heroes };
         }).ToList();
@@ -781,7 +783,8 @@ public sealed class Plugin : BasePlugin
             {
                 var combat = ReadList(Read(battle, "comPlayerList"))
                     .FirstOrDefault(candidate => NativePointer(Read(candidate, "heroData") ?? candidate) == NativePointer(hero!));
-                return DescribeHero(hero!, combat);
+                return DescribeHero(hero!, combat, Read(Read(battle, "advFieldData"), "advTallyData"),
+                    Math.Max(0, (DateTimeOffset.UtcNow - capture.StartedAt).TotalSeconds));
             }).ToList();
         EmitCatalogs();
         ExportPendingIcons(24);
@@ -822,7 +825,7 @@ public sealed class Plugin : BasePlugin
         };
     }
 
-    private static Dictionary<string, object?> DescribeHero(object hero, object? combat = null)
+    private static Dictionary<string, object?> DescribeHero(object hero, object? combat = null, object? tallyData = null, double? observedBattleTime = null)
     {
         var save = Read(hero, "saveHeroData");
         var jobId = ReadNullableInt(save, "jobId");
@@ -847,12 +850,100 @@ public sealed class Plugin : BasePlugin
             ["stats"] = DescribeStats(Read(hero, "attrData"), hero, ReadNullableInt(save, "level")),
             ["combatStats"] = DescribeStats(Read(combat, "attrData"), hero, ReadNullableInt(save, "level")),
             ["combatEffects"] = TryDescribeCombatEffects(combat),
+            ["damageDone"] = TryDescribeDamageDone(hero, tallyData, observedBattleTime),
             ["inCombat"] = combat is not null,
             ["currentHealth"] = currentHealth,
             ["isDead"] = combat is not null && currentHealth is <= 0,
             ["equippedItems"] = equipped
             , ["talents"] = ReadValues(Read(Read(hero, "heroTalentData"), "talentDic")).Select(DescribeHeroTalent).ToList()
         };
+    }
+
+    private static Dictionary<string, object?>? TryDescribeDamageDone(object hero, object? tallyData, double? observedBattleTime)
+    {
+        if (tallyData is null) return null;
+        try { return DescribeDamageDone(hero, tallyData, observedBattleTime); }
+        catch (Exception error)
+        {
+            Instance?.Log.LogWarning($"Damage-meter extraction failed safely: {error.Message}");
+            return null;
+        }
+    }
+
+    private static Dictionary<string, object?> DescribeDamageDone(object hero, object tallyData, double? observedBattleTime)
+    {
+        var heroUniqueId = ReadNullableInt(Read(hero, "saveHeroData"), "uniqueId");
+        var fieldData = Read(tallyData, "advFieldData");
+        var savedBattleTime = ReadNullableDouble(Read(fieldData, "saveAdvFieldData"), "battleTime") ?? 0;
+        var meterBattleTime = ReadNullableDouble(tallyData, "battleTime") ?? 0;
+        var battleTime = Math.Max(0, savedBattleTime > 0 ? savedBattleTime : meterBattleTime > 0 ? meterBattleTime : observedBattleTime ?? 0);
+        object? damageItems = null;
+        foreach (var entry in ReadEntries(Read(tallyData, "tallyItemDic")))
+        {
+            if (!string.Equals(Read(entry, "Key")?.ToString(), "damage", StringComparison.OrdinalIgnoreCase)) continue;
+            damageItems = Read(entry, "Value");
+            break;
+        }
+
+        var entries = new List<Dictionary<string, object?>>();
+        foreach (var item in ReadList(damageItems))
+        {
+            var save = Read(item, "saveTallyItemData");
+            if (heroUniqueId is null || ReadNullableInt(save, "heroUniqueId") != heroUniqueId) continue;
+            var damage = Math.Max(0, ReadNullableDouble(save, "tallyValue") ?? 0);
+            if (damage <= 0) continue;
+
+            var originType = Read(save, "originType")?.ToString();
+            var originId = ReadNullableInt(save, "id");
+            var source = Read(item, "tSkillData") ?? Read(item, "tTalentData") ?? Read(item, "tMasteryData")
+                ?? Read(item, "tEquipData") ?? Read(item, "tSummonData");
+            var name = ReadString(item, "nameStr") ?? ReadString(source, "name")
+                ?? (originId is not null ? $"{originType ?? "source"} {originId}" : "Unknown source");
+            var englishName = EnglishName(source, name);
+            var icon = ReadString(item, "iconStr") ?? ReadString(source, "icon");
+            QueueIcon(icon);
+
+            // TallyItemData.RefreshPerSecond uses this same battle time. Calculate from the
+            // meter's accumulated value so snapshots remain correct even when its UI is closed.
+            var dps = battleTime > 0 ? damage / battleTime : 0;
+            entries.Add(new()
+            {
+                ["key"] = $"{originType ?? "unknown"}:{originId?.ToString(CultureInfo.InvariantCulture) ?? "unknown"}",
+                ["originType"] = originType,
+                ["originId"] = originId,
+                ["name"] = name,
+                ["englishName"] = englishName,
+                ["iconKey"] = icon,
+                ["iconUrl"] = IconUrl(icon),
+                ["damage"] = damage,
+                ["dps"] = dps,
+                ["share"] = ReadNullableDouble(item, "per")
+            });
+        }
+
+        entries = entries.OrderByDescending(entry => Convert.ToDouble(entry["dps"] ?? 0, CultureInfo.InvariantCulture))
+            .ThenBy(entry => Convert.ToString(entry["englishName"] ?? entry["name"], CultureInfo.InvariantCulture))
+            .ToList();
+        var totalDamage = entries.Sum(entry => Convert.ToDouble(entry["damage"] ?? 0, CultureInfo.InvariantCulture));
+        return new()
+        {
+            ["battleTimeSeconds"] = battleTime,
+            ["battleTimeSource"] = savedBattleTime > 0 ? "saveAdvFieldData.battleTime"
+                : meterBattleTime > 0 ? "advTallyData.battleTime" : "battle.created elapsed time",
+            ["totalDamage"] = totalDamage,
+            ["totalDps"] = battleTime > 0 ? totalDamage / battleTime : 0,
+            ["entries"] = entries
+        };
+    }
+
+    private static double? GetObservedBattleTime(int battleIndex)
+    {
+        lock (StateLock)
+        {
+            return Battles.TryGetValue(battleIndex, out var capture)
+                ? Math.Max(0, (DateTimeOffset.UtcNow - capture.StartedAt).TotalSeconds)
+                : null;
+        }
     }
 
     private static List<Dictionary<string, object?>> TryDescribeCombatEffects(object? combat)

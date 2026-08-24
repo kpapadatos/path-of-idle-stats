@@ -4,7 +4,7 @@ import { ChangeDetectionStrategy, Component, computed, ElementRef, HostListener,
 import { bootstrapApplication } from '@angular/platform-browser';
 
 type TelemetryEvent = { type: string; timestamp?: string; payload?: unknown } & Record<string, unknown>;
-type CombatTimelineEntry = { id: number; capturedAt: number; stats: any[]; effects: any[] };
+type CombatTimelineEntry = { id: number; capturedAt: number; stats: any[]; effects: any[]; damageDone: any | null };
 type CodexRarityKey = 'rare' | 'legendary' | 'set' | 'unique' | 'mythic';
 type CodexSnapshot = { updatedAt: string | null; items: any[]; affixPools: Array<{ id: number; stats: any[] }>; rarities: any[] };
 type ScannerFilter = { id: string; title: string; groupId: string | null; enabled: boolean; itemKeys: string[]; anchorItemKey: string | null; statIds: number[]; minimumAttributeMatches: number };
@@ -497,8 +497,8 @@ type TelemetryState = {
               </div>
             </section>
             <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
-              <div class="flex min-w-0 flex-1 flex-wrap items-center gap-x-1.5 gap-y-2">
-                <button *ngFor="let effect of combatEffects(); trackBy: trackEffect" type="button" [attr.data-effect-key]="effectKey($any(effect))" (pointerenter)="showEffectTooltip($event, $any(effect))" (pointerleave)="hideTooltips()" class="relative h-9 w-9 rounded-lg border bg-zinc-950 p-1" [class]="effectBorderClass($any(effect))" [attr.aria-label]="effectTitle($any(effect))">
+              <div class="flex min-w-0 flex-1 flex-wrap items-center gap-x-1 gap-y-1.5">
+                <button *ngFor="let effect of combatEffects(); trackBy: trackEffect" type="button" [attr.data-effect-key]="effectKey($any(effect))" (pointerenter)="showEffectTooltip($event, $any(effect))" (pointerleave)="hideTooltips()" class="relative h-[35px] w-[35px] rounded-lg border bg-zinc-950 p-1" [class]="effectBorderClass($any(effect))" [attr.aria-label]="effectTitle($any(effect))">
                   <img *ngIf="effectIconUrl($any(effect)) as effectIcon" [src]="effectIcon" class="h-full w-full object-contain" alt="">
                   <span *ngIf="$any(effect).stacks > 1" class="absolute -bottom-1.5 -right-1.5 min-w-4 rounded-full border border-zinc-700 bg-zinc-950 px-1 text-center text-[9px] font-bold text-zinc-100">{{ $any(effect).stacks }}</span>
                 </button>
@@ -514,17 +514,40 @@ type TelemetryState = {
             </div>
             <div class="grid gap-4 md:grid-cols-2">
               <section class="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4">
-                <h3 class="mb-3 text-center text-sm font-semibold text-zinc-200">Current hero stats</h3>
-                <div *ngIf="heroStats($any(hero), false).length; else noCurrentStats" class="divide-y divide-zinc-800">
-                  <div *ngFor="let stat of heroStats($any(hero), false); trackBy: trackStat" [attr.data-stat-key]="statKey(stat, false)" (pointerenter)="showStatTooltip($event, $any(stat))" (pointerleave)="hideTooltips()" class="flex items-center justify-between gap-4 px-2 py-2 text-sm hover:bg-zinc-800/60">
-                    <span class="min-w-0 truncate text-zinc-400">{{ statName($any(stat)) }}</span>
-                    <span class="shrink-0 font-mono text-zinc-100">{{ statListValue($any(stat)) }}</span>
-                  </div>
+                <div class="mb-3 flex h-5 items-center justify-center gap-1 text-sm font-semibold" role="tablist" aria-label="Current hero data view">
+                  <button type="button" role="tab" [attr.aria-selected]="currentHeroDataView() === 'stats'" (click)="selectCurrentHeroDataView('stats')" class="h-5 rounded-md px-2 leading-5 transition" [class]="currentHeroDataView() === 'stats' ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'">Current hero stats</button>
+                  <span class="text-zinc-700" aria-hidden="true">·</span>
+                  <button type="button" role="tab" [attr.aria-selected]="currentHeroDataView() === 'damage'" (click)="selectCurrentHeroDataView('damage')" class="h-5 rounded-md px-2 leading-5 transition" [class]="currentHeroDataView() === 'damage' ? 'bg-amber-950/60 text-amber-200' : 'text-zinc-500 hover:text-zinc-300'">Damage done</button>
                 </div>
-                <ng-template #noCurrentStats><p class="py-8 text-center text-sm text-zinc-600">Refresh to capture hero stats.</p></ng-template>
+                <ng-container *ngIf="currentHeroDataView() === 'stats'; else damageDoneView">
+                  <div *ngIf="heroStats($any(hero), false).length; else noCurrentStats" class="divide-y divide-zinc-800">
+                    <div *ngFor="let stat of heroStats($any(hero), false); trackBy: trackStat" [attr.data-stat-key]="statKey(stat, false)" (pointerenter)="showStatTooltip($event, $any(stat))" (pointerleave)="hideTooltips()" class="flex items-center justify-between gap-4 px-2 py-2 text-sm hover:bg-zinc-800/60">
+                      <span class="min-w-0 truncate text-zinc-400">{{ statName($any(stat)) }}</span>
+                      <span class="shrink-0 font-mono text-zinc-100">{{ statListValue($any(stat)) }}</span>
+                    </div>
+                  </div>
+                  <ng-template #noCurrentStats><p class="py-8 text-center text-sm text-zinc-600">Refresh to capture hero stats.</p></ng-template>
+                </ng-container>
+                <ng-template #damageDoneView>
+                  <ng-container *ngIf="currentDamageDone() as damage; else noDamageDone">
+                    <div class="mb-2 flex items-center justify-between rounded-lg border border-amber-900/50 bg-amber-950/20 px-3 py-2">
+                      <div><p class="text-xs uppercase tracking-wide text-zinc-500">Total DPS</p><p class="font-mono text-lg font-semibold text-amber-200">{{ compactDps($any(damage).totalDps) }}</p></div>
+                      <div class="text-right text-xs text-zinc-500"><p>{{ compactNumber($any(damage).totalDamage) }} damage</p><p>{{ damageBattleTime($any(damage)) }}</p></div>
+                    </div>
+                    <div *ngIf="damageDoneEntries().length; else noDamageEntries" class="divide-y divide-zinc-800">
+                      <div *ngFor="let entry of damageDoneEntries(); trackBy: trackDamageEntry" class="flex items-center gap-3 px-2 py-2 text-sm hover:bg-zinc-800/60">
+                        <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-zinc-700 bg-zinc-950 p-1"><img *ngIf="$any(entry).iconUrl" [src]="$any(entry).iconUrl" class="h-full w-full object-contain" alt=""></div>
+                        <div class="min-w-0 flex-1"><p class="truncate text-zinc-200">{{ $any(entry).englishName || $any(entry).name || 'Unknown source' }}</p><p class="text-[11px] text-zinc-600">{{ compactNumber($any(entry).damage) }} damage</p></div>
+                        <span class="shrink-0 font-mono font-semibold text-amber-200">{{ compactDps($any(entry).dps) }}</span>
+                      </div>
+                    </div>
+                    <ng-template #noDamageEntries><p class="py-8 text-center text-sm text-zinc-600">No damage has been recorded for this hero yet.</p></ng-template>
+                  </ng-container>
+                  <ng-template #noDamageDone><p class="py-8 text-center text-sm text-zinc-600">This snapshot has no damage-meter data.</p></ng-template>
+                </ng-template>
               </section>
               <section class="rounded-xl border border-rose-950 bg-rose-950/10 p-4">
-                <h3 class="mb-3 text-center text-sm font-semibold text-rose-200">Live combat stats<span *ngIf="selectedTimelineEntry() as entry" class="ml-2 font-normal text-rose-400/60">{{ entry.capturedAt | date:'HH:mm:ss' }}</span></h3>
+                <h3 class="mb-3 h-5 text-center text-sm font-semibold leading-5 text-rose-200">Live combat stats<span *ngIf="selectedTimelineEntry() as entry" class="ml-2 font-normal text-rose-400/60">{{ entry.capturedAt | date:'HH:mm:ss' }}</span></h3>
                 <div *ngIf="heroStats($any(hero), true).length; else noCombatStats" class="divide-y divide-zinc-800">
                   <div *ngFor="let stat of heroStats($any(hero), true); trackBy: trackStat" [attr.data-stat-key]="statKey(stat, true)" (pointerenter)="showStatTooltip($event, $any(stat))" (pointerleave)="hideTooltips()" class="flex items-center justify-between gap-4 px-2 py-2 text-sm hover:bg-zinc-800/60">
                     <span class="min-w-0 truncate text-zinc-400">{{ statName($any(stat)) }}</span>
@@ -635,6 +658,7 @@ class AppComponent implements OnInit, OnDestroy {
   readonly catalogs = signal<Record<string, any[]>>({});
   readonly selectedHero = signal<any | null>(null);
   readonly selectedHeroTab = signal<'talents' | 'stats'>('talents');
+  readonly currentHeroDataView = signal<'stats' | 'damage'>('stats');
   readonly hoveredTalent = signal<any | null>(null);
   readonly hoveredStat = signal<any | null>(null);
   readonly hoveredEffect = signal<any | null>(null);
@@ -739,6 +763,14 @@ class AppComponent implements OnInit, OnDestroy {
     ];
   });
   readonly hasCombatEffects = computed(() => this.combatEffects().length > 0);
+  readonly currentDamageDone = computed<any | null>(() => {
+    const selected = this.selectedTimelineEntry();
+    return selected ? selected.damageDone : this.selectedHero()?.damageDone ?? null;
+  });
+  readonly damageDoneEntries = computed<any[]>(() => {
+    const entries = this.currentDamageDone()?.entries;
+    return Array.isArray(entries) ? entries : [];
+  });
   readonly state = signal<TelemetryState>({ connected: false, gameRunning: false, updatedAt: null, heroes: [], slots: [], resources: [], sanctum: null, inventory: [], battles: [], events: [], catalogs: {} });
   readonly status = signal('Connecting');
   private stream?: EventSource;
@@ -1621,6 +1653,7 @@ class AppComponent implements OnInit, OnDestroy {
     return rate >= 100 ? Math.round(rate).toLocaleString('en-US') : rate.toLocaleString('en-US', { maximumFractionDigits: 1 });
   }
   trackStat(_index: number, stat: any): string { return String(stat?.id ?? stat?.key); }
+  trackDamageEntry(_index: number, entry: any): string { return String(entry?.key ?? `${entry?.originType ?? 'unknown'}:${entry?.originId ?? _index}`); }
   trackTimelineEntry(_index: number, entry: CombatTimelineEntry): number { return entry.id; }
   timelinePosition(index: number): number {
     const count = this.timelineEntries().length;
@@ -1704,6 +1737,28 @@ class AppComponent implements OnInit, OnDestroy {
     const name = String(stat?.englishName || stat?.name || '').trim();
     const key = this.humanizeStatKey(String(stat?.key || 'Unknown'));
     return Number(stat?.showType) === 0 && name && name !== key ? `${name} (${key})` : name || key;
+  }
+  selectCurrentHeroDataView(view: 'stats' | 'damage') { this.hideTooltips(); this.currentHeroDataView.set(view); }
+  compactDps(value: unknown): string { return `${this.compactNumber(value)}/s`; }
+  compactNumber(value: unknown): string {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return '—';
+    const absolute = Math.abs(number);
+    const units = [
+      { threshold: 1e12, suffix: 'T' },
+      { threshold: 1e9, suffix: 'B' },
+      { threshold: 1e6, suffix: 'M' },
+      { threshold: 1e3, suffix: 'K' }
+    ];
+    const unit = units.find(entry => absolute >= entry.threshold);
+    if (!unit) return Math.round(number).toLocaleString('en-US');
+    const scaled = number / unit.threshold;
+    const maximumFractionDigits = Math.abs(scaled) >= 100 ? 0 : Math.abs(scaled) >= 10 ? 1 : 2;
+    return `${scaled.toLocaleString('en-US', { maximumFractionDigits })}${unit.suffix}`;
+  }
+  damageBattleTime(damage: any): string {
+    const seconds = Number(damage?.battleTimeSeconds);
+    return Number.isFinite(seconds) && seconds > 0 ? `${seconds.toFixed(1)}s elapsed` : 'Battle time n/a';
   }
   private humanizeStatKey(key: string): string {
     return key.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/_/g, ' ').replace(/^./, value => value.toUpperCase());
@@ -1810,7 +1865,11 @@ class AppComponent implements OnInit, OnDestroy {
         id: Date.now(),
         capturedAt: Date.now(),
         stats: hero.combatStats.map((stat: any) => ({ ...stat })),
-        effects: (Array.isArray(hero.combatEffects) ? hero.combatEffects : []).map((effect: any) => ({ ...effect }))
+        effects: (Array.isArray(hero.combatEffects) ? hero.combatEffects : []).map((effect: any) => ({ ...effect })),
+        damageDone: hero.damageDone ? {
+          ...hero.damageDone,
+          entries: (Array.isArray(hero.damageDone.entries) ? hero.damageDone.entries : []).map((damage: any) => ({ ...damage }))
+        } : null
       };
       this.hideTooltips();
       this.timelineEntries.update(entries => [...entries, entry]);
@@ -1827,7 +1886,7 @@ class AppComponent implements OnInit, OnDestroy {
     return battle?.timestamp ?? null;
   }
   battleResultClass(result: unknown) { return String(result).toLowerCase().includes('win') ? 'bg-emerald-950 text-emerald-300' : 'bg-rose-950 text-rose-300'; }
-  openHero(hero: any) { this.stopRecording(); this.clearTimeline(); this.selectedHero.set(hero); this.selectedHeroTab.set('talents'); }
+  openHero(hero: any) { this.stopRecording(); this.clearTimeline(); this.currentHeroDataView.set('stats'); this.selectedHero.set(hero); this.selectedHeroTab.set('talents'); }
   selectHeroTab(tab: 'talents' | 'stats') { this.hideTooltips(); this.selectedHeroTab.set(tab); }
   closeHero() { this.stopRecording(); this.selectedHero.set(null); this.hideTooltips(); }
   async resetSlot(slot: number) {
