@@ -52,6 +52,13 @@ type TelemetryState = {
         </article>
       </section>
 
+      <nav class="mb-3 flex gap-1 border-b border-zinc-800" role="tablist" aria-label="Dashboard sections">
+        <button type="button" role="tab" (click)="selectPageTab('battles')" [attr.aria-selected]="selectedPageTab() === 'battles'" class="border-b-2 px-4 py-2 text-sm font-medium" [class]="selectedPageTab() === 'battles' ? 'border-amber-400 text-amber-300' : 'border-transparent text-zinc-500 hover:text-zinc-300'">Battles</button>
+        <button type="button" role="tab" (click)="selectPageTab('compendium')" [attr.aria-selected]="selectedPageTab() === 'compendium'" class="border-b-2 px-4 py-2 text-sm font-medium" [class]="selectedPageTab() === 'compendium' ? 'border-amber-400 text-amber-300' : 'border-transparent text-zinc-500 hover:text-zinc-300'">Compendium</button>
+      </nav>
+
+      <ng-container *ngIf="selectedPageTab() === 'battles'">
+
       <section class="space-y-3">
         <article *ngFor="let slot of battleSlots" class="rounded-2xl border border-zinc-700 bg-gradient-to-br from-zinc-900 to-zinc-950 p-3 shadow-xl shadow-black/20">
           <div class="grid grid-cols-1 gap-2 sm:grid-cols-3">
@@ -113,6 +120,57 @@ type TelemetryState = {
           </div>
         </div>
         <ng-template #noLootRates><p class="py-4 text-center text-sm text-zinc-600">Waiting for completed battles with loot.</p></ng-template>
+      </section>
+      </ng-container>
+
+      <section *ngIf="selectedPageTab() === 'compendium'" aria-label="Talent compendium">
+        <div class="mb-3 flex items-center gap-3">
+          <label class="min-w-0 flex-1">
+            <span class="sr-only">Search talents</span>
+            <input type="search" [value]="talentSearch()" (input)="setTalentSearch($event)" placeholder="Search talents, classes, descriptions, IDs…" class="w-full rounded-xl border border-zinc-700 bg-zinc-950 px-4 py-2.5 text-sm text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-amber-600 focus:ring-1 focus:ring-amber-600">
+          </label>
+          <div class="flex shrink-0 items-center gap-1 rounded-xl border border-zinc-700 bg-zinc-950 p-1" aria-label="Talent rank">
+            <button type="button" (click)="adjustCompendiumRank(-1)" [disabled]="compendiumRank() <= 1" aria-label="Decrease rank" class="flex h-8 w-8 items-center justify-center rounded-lg text-lg text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-30">−</button>
+            <input type="number" min="1" max="15" [value]="compendiumRank()" (input)="setCompendiumRank($event)" aria-label="Talent rank" class="rank-input h-8 w-14 border-x border-zinc-800 bg-transparent text-center font-mono text-sm font-semibold text-amber-300 outline-none">
+            <button type="button" (click)="adjustCompendiumRank(1)" [disabled]="compendiumRank() >= 15" aria-label="Increase rank" class="flex h-8 w-8 items-center justify-center rounded-lg text-lg text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-30">+</button>
+          </div>
+        </div>
+
+        <section *ngIf="selectedCompendiumTalents().length" class="mb-5 border-b border-zinc-800 pb-5" aria-label="Selected talents">
+          <h2 class="mb-2 text-sm font-semibold text-zinc-300">Selected talents</h2>
+          <div class="grid grid-cols-3 gap-3">
+            <ng-container *ngFor="let talent of selectedCompendiumTalents(); trackBy: trackCompendiumTalent">
+              <ng-container *ngTemplateOutlet="compendiumTalentCard; context: { $implicit: talent }"></ng-container>
+            </ng-container>
+          </div>
+        </section>
+
+        <div *ngIf="compendiumTalents().length; else noCompendiumTalents" class="grid grid-cols-3 gap-3">
+          <ng-container *ngFor="let talent of compendiumTalents(); trackBy: trackCompendiumTalent">
+            <ng-container *ngTemplateOutlet="compendiumTalentCard; context: { $implicit: talent }"></ng-container>
+          </ng-container>
+        </div>
+        <ng-template #compendiumTalentCard let-talent>
+          <button type="button" (click)="toggleCompendiumTalent(talent)" [attr.aria-pressed]="isCompendiumTalentSelected(talent)" [class]="isCompendiumTalentSelected(talent) ? 'flex min-w-0 gap-3 rounded-xl border border-amber-600 bg-amber-950/20 p-3 text-left transition hover:bg-amber-950/30' : 'flex min-w-0 gap-3 rounded-xl border border-zinc-800 bg-zinc-900/70 p-3 text-left transition hover:border-zinc-600 hover:bg-zinc-900'">
+            <div class="relative h-20 w-20 shrink-0 rounded-xl border border-zinc-700 bg-zinc-950 p-2">
+              <img *ngIf="$any(talent).iconUrl" [src]="$any(talent).iconUrl" class="h-full w-full object-contain" alt="">
+              <span class="absolute bottom-1 right-1 flex h-7 w-7 items-center justify-center rounded-full border border-zinc-600 bg-zinc-950 p-1 shadow-lg">
+                <img *ngIf="$any(talent).classIconUrl" [src]="$any(talent).classIconUrl" class="h-full w-full object-contain" [alt]="$any(talent).className">
+              </span>
+            </div>
+            <div class="min-w-0 flex-1">
+              <div class="flex items-start gap-2">
+                <h2 class="min-w-0 font-semibold leading-tight text-zinc-100">
+                  {{ $any(talent).englishName || $any(talent).name || 'Unknown talent' }}<span *ngIf="isCompendiumTalentSelected(talent)" class="ml-1.5 text-amber-400" aria-label="Pinned">📌</span>
+                </h2>
+                <span class="ml-auto shrink-0 font-mono text-xs text-zinc-300 opacity-50">{{ compendiumRank() }}/15</span>
+              </div>
+              <p class="mt-1 text-xs font-medium text-amber-400">{{ $any(talent).className }}</p>
+              <p class="mt-2 whitespace-pre-line text-xs leading-relaxed text-zinc-400">{{ $any(talent).displayDescription || 'No description available.' }}</p>
+            </div>
+          </button>
+        </ng-template>
+        <ng-template #noCompendiumTalents><p class="rounded-xl border border-zinc-800 bg-zinc-950 py-12 text-center text-sm text-zinc-600">No talents match this search.</p></ng-template>
       </section>
 
       <div *ngIf="selectedHero() as hero" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" (click)="closeHero()">
@@ -256,6 +314,11 @@ type TelemetryState = {
 class AppComponent implements OnInit, OnDestroy {
   readonly battleSlots = [0, 1, 2];
   readonly heroPositions = [0, 1, 2];
+  readonly selectedPageTab = signal<'battles' | 'compendium'>('battles');
+  readonly talentSearch = signal('');
+  readonly compendiumRank = signal(1);
+  readonly selectedCompendiumTalentIds = signal<ReadonlySet<number>>(new Set<number>());
+  readonly catalogs = signal<Record<string, any[]>>({});
   readonly selectedHero = signal<any | null>(null);
   readonly selectedHeroTab = signal<'talents' | 'stats'>('talents');
   readonly hoveredTalent = signal<any | null>(null);
@@ -265,6 +328,35 @@ class AppComponent implements OnInit, OnDestroy {
   readonly recording = signal(false);
   readonly timelineEntries = signal<CombatTimelineEntry[]>([]);
   readonly selectedTimelineId = signal<number | null>(null);
+  readonly compendiumTalentEntries = computed<any[]>(() => {
+    const rank = this.compendiumRank();
+    const jobs = new Map((this.catalogs()['jobs'] || []).map((job: any) => [Number(job?.id), job]));
+    return (this.catalogs()['talents'] || []).filter((talent: any) => Number(talent?.masteryId) > 0 && Number(talent?.skillId) <= 0).map((talent: any) => {
+      const jobId = Number(talent?.jobId);
+      const job = jobs.get(jobId);
+      const ranked = Array.isArray(talent?.rankDescriptions) ? talent.rankDescriptions[rank - 1] : null;
+      const displayDescription = this.plainGameText(ranked || talent?.englishDescription || talent?.description || '');
+      const className = this.plainGameText(job?.englishName || job?.name || `Class ${jobId}`);
+      const searchable = this.plainGameText(JSON.stringify({ ...talent, className, selectedRank: rank, displayDescription })).toLocaleLowerCase('en-US');
+      return {
+        ...talent,
+        className,
+        classIconUrl: job?.iconUrl || this.classIconUrl(jobId),
+        displayDescription,
+        _searchable: searchable
+      };
+    }).sort((left: any, right: any) => Number(left?.jobId) - Number(right?.jobId)
+        || Number(left?.floor) - Number(right?.floor)
+        || Number(left?.id) - Number(right?.id));
+  });
+  readonly compendiumTalents = computed<any[]>(() => {
+    const search = this.talentSearch().trim().toLocaleLowerCase('en-US');
+    return this.compendiumTalentEntries().filter((talent: any) => !search || talent._searchable.includes(search));
+  });
+  readonly selectedCompendiumTalents = computed<any[]>(() => {
+    const selectedIds = this.selectedCompendiumTalentIds();
+    return this.compendiumTalentEntries().filter((talent: any) => selectedIds.has(Number(talent?.id)));
+  });
   readonly combatEffects = computed<any[]>(() => {
     const selected = this.selectedTimelineEntry();
     const hero = this.selectedHero();
@@ -294,6 +386,8 @@ class AppComponent implements OnInit, OnDestroy {
   private tooltipValidationFrame?: number;
   private activeTooltipId?: string;
   private activeTooltipAnchor?: HTMLElement;
+  private catalogRefreshRequested = false;
+  private destroyed = false;
   private readonly nativePointerMove = (event: PointerEvent) => {
     if (!this.activeTooltipId || !this.activeTooltipAnchor) return;
     const target = event.target;
@@ -307,21 +401,25 @@ class AppComponent implements OnInit, OnDestroy {
   constructor(private readonly zone: NgZone) {}
 
   async ngOnInit() {
+    this.restoreCompendiumPreferences();
     this.zone.runOutsideAngular(() => document.addEventListener('pointermove', this.nativePointerMove, { passive: true }));
     try {
       const [live, catalogs] = await Promise.all([
         fetch('/api/state').then(response => response.json()),
         fetch('/api/catalogs').then(response => response.json())
       ]);
+      this.catalogs.set(catalogs);
       this.state.set({ ...live, catalogs });
+      if (live.gameRunning) void this.refreshTalentCatalogIfNeeded();
     } catch { /* server stream will retry */ }
     this.stream = new EventSource('/api/stream');
     this.stream.onopen = () => this.status.set('Backend connected');
     this.stream.onerror = () => this.status.set('Reconnecting');
     this.stream.onmessage = event => {
       const previousSnapshotTimestamp = this.latestSlotSnapshotTimestamp(this.state());
-      const next = { ...JSON.parse(event.data), catalogs: this.state().catalogs } as TelemetryState;
+      const next = { ...JSON.parse(event.data), catalogs: this.catalogs() } as TelemetryState;
       this.state.set(next);
+      if (next.gameRunning) void this.refreshTalentCatalogIfNeeded();
       this.scheduleTooltipAnchorValidation();
       if (this.pendingSnapshot && this.latestSlotSnapshotTimestamp(next) !== this.pendingSnapshot.previousTimestamp) {
         window.clearTimeout(this.pendingSnapshot.timeout);
@@ -344,12 +442,79 @@ class AppComponent implements OnInit, OnDestroy {
     };
   }
   ngOnDestroy() {
+    this.destroyed = true;
     this.stream?.close();
     this.stopRecording();
     if (this.pendingSnapshot) { window.clearTimeout(this.pendingSnapshot.timeout); this.pendingSnapshot.resolve(null); this.pendingSnapshot = undefined; }
     document.removeEventListener('pointermove', this.nativePointerMove);
     if (this.tooltipFrame) cancelAnimationFrame(this.tooltipFrame);
     if (this.tooltipValidationFrame) cancelAnimationFrame(this.tooltipValidationFrame);
+  }
+  selectPageTab(tab: 'battles' | 'compendium') { this.hideTooltips(); this.selectedPageTab.set(tab); }
+  setTalentSearch(event: Event) { this.talentSearch.set((event.target as HTMLInputElement).value); }
+  setCompendiumRank(event: Event) {
+    const value = (event.target as HTMLInputElement).valueAsNumber;
+    this.updateCompendiumRank(value);
+  }
+  adjustCompendiumRank(offset: -1 | 1) { this.updateCompendiumRank(this.compendiumRank() + offset); }
+  isCompendiumTalentSelected(talent: any): boolean { return this.selectedCompendiumTalentIds().has(Number(talent?.id)); }
+  toggleCompendiumTalent(talent: any) {
+    const id = Number(talent?.id);
+    if (!Number.isFinite(id)) return;
+    const selected = new Set(this.selectedCompendiumTalentIds());
+    if (selected.has(id)) selected.delete(id); else selected.add(id);
+    this.selectedCompendiumTalentIds.set(selected);
+    this.writeLocalStorage('path-of-idle-stats.compendium.selected-talents', JSON.stringify([...selected]));
+  }
+  trackCompendiumTalent(_index: number, talent: any): number { return Number(talent?.id); }
+  private updateCompendiumRank(value: number) {
+    const rank = this.clampCompendiumRank(value);
+    this.compendiumRank.set(rank);
+    this.writeLocalStorage('path-of-idle-stats.compendium.rank', String(rank));
+  }
+  private restoreCompendiumPreferences() {
+    try {
+      const storedRank = window.localStorage.getItem('path-of-idle-stats.compendium.rank');
+      if (storedRank != null) this.compendiumRank.set(this.clampCompendiumRank(Number(storedRank)));
+      const storedTalents = JSON.parse(window.localStorage.getItem('path-of-idle-stats.compendium.selected-talents') || '[]');
+      if (Array.isArray(storedTalents)) {
+        this.selectedCompendiumTalentIds.set(new Set(storedTalents.map(Number).filter(Number.isFinite)));
+      }
+    } catch { /* localStorage can be unavailable in privacy-restricted contexts */ }
+  }
+  private writeLocalStorage(key: string, value: string) {
+    try { window.localStorage.setItem(key, value); } catch { /* preferences remain in memory */ }
+  }
+  private clampCompendiumRank(value: number): number { return Number.isFinite(value) ? Math.max(1, Math.min(15, Math.round(value))) : 1; }
+  private plainGameText(value: unknown): string {
+    return String(value ?? '')
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<[^>]*>/g, '')
+      .replace(/[\u200B-\u200D\uFEFF]/g, '')
+      .replace(/\r\n?/g, '\n')
+      .replace(/[^\S\n]+/g, ' ')
+      .replace(/ *\n */g, '\n')
+      .trim();
+  }
+  private talentCatalogReady(catalogs: Record<string, any[]>): boolean {
+    const talents = (catalogs['talents'] || []).filter((talent: any) => Number(talent?.masteryId) > 0 && Number(talent?.skillId) <= 0);
+    return talents.length > 0 && talents.every((talent: any) => Array.isArray(talent?.rankDescriptions)
+      && talent.rankDescriptions.length === 15 && talent.rankDescriptions.some((description: unknown) => String(description || '').trim()));
+  }
+  private async refreshTalentCatalogIfNeeded() {
+    if (this.catalogRefreshRequested || this.talentCatalogReady(this.catalogs())) return;
+    this.catalogRefreshRequested = true;
+    try {
+      const response = await fetch('/api/catalogs/refresh', { method: 'POST' });
+      if (!response.ok) return;
+      for (let attempt = 0; attempt < 40 && !this.destroyed; attempt++) {
+        await new Promise(resolve => window.setTimeout(resolve, 500));
+        const catalogs = await fetch('/api/catalogs').then(result => result.json()) as Record<string, any[]>;
+        this.catalogs.set(catalogs);
+        this.state.update(current => ({ ...current, catalogs }));
+        if (this.talentCatalogReady(catalogs)) return;
+      }
+    } catch { /* The next page load can request the catalog again. */ }
   }
   slotBattles(slot: number): TelemetryEvent[] { return this.state().battles.filter(battle => Number((battle as any).payload?.battleIndex) === slot); }
   trackBattle(index: number, battle: TelemetryEvent): string {

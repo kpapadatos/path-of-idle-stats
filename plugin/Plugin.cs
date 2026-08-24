@@ -23,7 +23,7 @@ public sealed class Plugin : BasePlugin
 {
     public const string PluginGuid = "local.pathofidle.stats";
     public const string PluginName = "Path of Idle Stats";
-    public const string PluginVersion = "0.4.0";
+    public const string PluginVersion = "0.5.3";
 
     private static Plugin? Instance;
     private static readonly object StateLock = new();
@@ -56,7 +56,7 @@ public sealed class Plugin : BasePlugin
         Log.LogInfo($"{PluginName} {PluginVersion} loaded with read-only telemetry hooks.");
     }
 
-    private static void TableReadyPostfix() => SafeHook("table-ready", EmitCatalogOnce);
+    private static void TableReadyPostfix() => SafeHook("table-ready", () => EmitCatalogs());
 
     private static void RootUpdatePostfix() => SafeHook("snapshot-request", () =>
     {
@@ -68,10 +68,21 @@ public sealed class Plugin : BasePlugin
         }
         if (now < nextSnapshotRequestCheck) return;
         nextSnapshotRequestCheck = now + 0.25f;
-        var requestPath = Path.Combine(Paths.BepInExRootPath, "PathOfIdleStats", "snapshot.request");
-        if (!File.Exists(requestPath)) return;
-        File.Delete(requestPath);
-        EmitLiveSlotSnapshot();
+        var telemetryDirectory = Path.Combine(Paths.BepInExRootPath, "PathOfIdleStats");
+        var catalogRequestPath = Path.Combine(telemetryDirectory, "catalog.request");
+        if (File.Exists(catalogRequestPath))
+        {
+            File.Delete(catalogRequestPath);
+            EmitCatalogs(true);
+            ExportPendingIcons(256);
+        }
+
+        var snapshotRequestPath = Path.Combine(telemetryDirectory, "snapshot.request");
+        if (File.Exists(snapshotRequestPath))
+        {
+            File.Delete(snapshotRequestPath);
+            EmitLiveSlotSnapshot();
+        }
     });
 
     private static void EmitLiveSlotSnapshot()
@@ -216,7 +227,7 @@ public sealed class Plugin : BasePlugin
                     .FirstOrDefault(candidate => NativePointer(Read(candidate, "heroData") ?? candidate) == NativePointer(hero!));
                 return DescribeHero(hero!, combat);
             }).ToList();
-        EmitCatalogOnce();
+        EmitCatalogs();
         ExportPendingIcons(24);
         var endedAt = DateTimeOffset.UtcNow;
         Instance?.writer?.Enqueue("battle.ended", new
@@ -534,6 +545,12 @@ public sealed class Plugin : BasePlugin
         var info = Read(skill, "tSkillInfoData");
         var talentId = ReadNullableInt(save, "id") ?? ReadNullableInt(table, "id");
         var skillId = ReadNullableInt(table, "skillId") ?? ReadNullableInt(skillTable, "id");
+        var masteryId = ReadNullableInt(table, "masteryId");
+        var masteryTable = masteryId is > 0 && skillId is not > 0
+            ? InvokeStatic("TableData", "getTMasteryData", masteryId.Value)
+            : null;
+        var titleSource = masteryTable ?? table;
+        var rawTitle = ReadString(titleSource, "name") ?? ReadString(table, "name");
         var baseSkillId = ReadNullableInt(Read(Read(talent, "ownHeroData"), "saveHeroData"), "baseSkillId");
         var positionId = ReadNullableInt(save, "posId") ?? 0;
         var positionRow = positionId == 0 ? null : InvokeStatic("TableData", "getTTalentPosData", positionId);
@@ -542,7 +559,7 @@ public sealed class Plugin : BasePlugin
         return new()
         {
             ["id"] = talentId,
-            ["name"] = ReadString(table, "name"), ["englishName"] = EnglishName(table, ReadString(table, "name")),
+            ["name"] = rawTitle, ["englishName"] = EnglishName(titleSource, rawTitle),
             ["description"] = ReadString(info, "des"), ["englishDescription"] = EnglishText(info, "_des", ReadString(info, "des")),
             ["rank"] = ReadNullableInt(save, "level"), ["effectiveRank"] = InvokeInt(talent, "GetLevel"),
             ["maxRank"] = InvokeInt(talent, "GetTalentLevelCap"), ["baseRank"] = ReadNullableInt(talent, "baseLevel"),
@@ -733,9 +750,14 @@ public sealed class Plugin : BasePlugin
         return output;
     }
 
-    private static void EmitCatalogOnce()
+    private static void EmitCatalogs(bool force = false)
     {
-        lock (StateLock) { if (catalogSent) return; catalogSent = true; }
+        lock (StateLock)
+        {
+            if (catalogSent && !force) return;
+            catalogSent = true;
+        }
+        EmitCatalog("jobs", "THeroJobDict", DescribeJobDefinition);
         EmitCatalog("talents", "TTalentDict", DescribeTalentDefinition);
         EmitCatalog("skills", "TSkillDict", DescribeSkillDefinition);
         EmitCatalog("abilities", "TAbilityDict", row => DescribeDefinition(row, "ability"));
@@ -756,6 +778,12 @@ public sealed class Plugin : BasePlugin
     private static Dictionary<string, object?> DescribeTalentDefinition(object row)
     {
         var skillId = ReadNullableInt(row, "skillId");
+        var masteryId = ReadNullableInt(row, "masteryId");
+        var mastery = masteryId is > 0 && skillId is not > 0
+            ? InvokeStatic("TableData", "getTMasteryData", masteryId.Value)
+            : null;
+        var titleSource = mastery ?? row;
+        var rawTitle = ReadString(titleSource, "name") ?? ReadString(row, "name");
         var skill = skillId is > 0 ? InvokeStatic("TableData", "getTSkillData", skillId.Value) : null;
         var infoId = ReadNullableInt(skill, "infoId");
         var info = infoId is > 0 ? InvokeStatic("TableData", "getTSkillInfoData", infoId.Value) : null;
@@ -763,11 +791,63 @@ public sealed class Plugin : BasePlugin
         return new()
         {
             ["kind"] = "talent", ["id"] = ReadNullableInt(row, "id"), ["jobId"] = ReadNullableInt(row, "jobId"),
-            ["name"] = ReadString(row, "name"), ["englishName"] = EnglishName(row, ReadString(row, "name")),
+            ["name"] = rawTitle, ["englishName"] = EnglishName(titleSource, rawTitle),
             ["description"] = ReadString(info, "des"), ["englishDescription"] = EnglishText(info, "_des", ReadString(info, "des")),
-            ["skillId"] = skillId, ["masteryId"] = ReadNullableInt(row, "masteryId"),
-            ["floor"] = ReadNullableInt(row, "floor"), ["iconKey"] = icon, ["iconUrl"] = IconUrl(icon)
+            ["skillId"] = skillId, ["masteryId"] = masteryId,
+            ["floor"] = ReadNullableInt(row, "floor"), ["iconKey"] = icon, ["iconUrl"] = IconUrl(icon),
+            ["rankDescriptions"] = masteryId is > 0 && skillId is not > 0 ? DescribeTalentRanks(skillId, masteryId, info) : null
         };
+    }
+
+    private static Dictionary<string, object?> DescribeJobDefinition(object row)
+    {
+        var id = ReadNullableInt(row, "id");
+        var icon = id is > 0 ? $"job_{id}" : ReadString(row, "icon");
+        QueueIcon(icon);
+        return new()
+        {
+            ["kind"] = "job", ["id"] = id,
+            ["name"] = ReadString(row, "name"), ["englishName"] = EnglishName(row, ReadString(row, "name")),
+            ["iconKey"] = icon, ["iconUrl"] = IconUrl(icon)
+        };
+    }
+
+    private static List<string?> DescribeTalentRanks(int? skillId, int? masteryId, object? fallbackInfo)
+    {
+        var descriptions = new List<string?>(15);
+        for (var rank = 1; rank <= 15; rank++)
+        {
+            try
+            {
+                var parts = new List<string>();
+                var preview = skillId is > 0 ? InvokeStaticArgs("SkillData", "CreatePreview", skillId.Value, rank, null!) : null;
+                var info = Read(preview, "tSkillInfoData") ?? fallbackInfo;
+                AddDescription(parts, EnglishText(info, "_des", ReadString(info, "des")));
+                foreach (var attribute in ReadList(Read(Read(preview, "skillExplainData"), "skillAttrList")))
+                {
+                    AddDescription(parts, ReadString(attribute, "des"));
+                    AddDescription(parts, ReadString(attribute, "explain"));
+                }
+
+                var mastery = masteryId is > 0 ? InvokeStaticArgs("MasteryData", "CreateByShow", masteryId.Value, rank, 15) : null;
+                mastery?.GetType().GetMethod("UpdateAffixList", BindingFlags.Instance | BindingFlags.Public)?.Invoke(mastery, null);
+                mastery?.GetType().GetMethod("InitExplainList", BindingFlags.Instance | BindingFlags.Public)?.Invoke(mastery, null);
+                foreach (var affix in ReadList(Read(mastery, "affixList"))) AddDescription(parts, InvokeString(affix, "GetDesc"));
+                descriptions.Add(parts.Count == 0 ? null : string.Join("\n", parts));
+            }
+            catch
+            {
+                descriptions.Add(EnglishText(fallbackInfo, "_des", ReadString(fallbackInfo, "des")));
+            }
+        }
+        return descriptions;
+    }
+
+    private static void AddDescription(List<string> descriptions, string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return;
+        var normalized = value.Trim();
+        if (!descriptions.Contains(normalized, StringComparer.Ordinal)) descriptions.Add(normalized);
     }
 
     private static Dictionary<string, object?> DescribeSkillDefinition(object row)

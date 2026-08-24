@@ -9,6 +9,7 @@ const eventLog = join(dataDirectory, 'events.jsonl');
 const webRoot = join(root, 'dist', 'dashboard', 'browser');
 const iconRoot = join(root, 'data', 'icons');
 const snapshotRequest = 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\PathOfIdle\\BepInEx\\PathOfIdleStats\\snapshot.request';
+const catalogRequest = 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\PathOfIdle\\BepInEx\\PathOfIdleStats\\catalog.request';
 const clients = new Set();
 const state = { connected: false, gameRunning: false, updatedAt: null, snapshotUpdatedAt: null, heroes: [], slots: [], resources: [], sanctum: null, inventory: [], battles: [], events: [], catalogs: {} };
 let lastGameHeartbeat = 0;
@@ -86,6 +87,11 @@ const server = createServer(async (request, response) => {
     if (request.method === 'GET' && url.pathname === '/api/health') return json(response, 200, { ok: true, updatedAt: state.updatedAt });
     if (request.method === 'GET' && url.pathname === '/api/state') return json(response, 200, publicState());
     if (request.method === 'GET' && url.pathname === '/api/catalogs') return json(response, 200, state.catalogs);
+    if (request.method === 'POST' && url.pathname === '/api/catalogs/refresh') {
+      await mkdir(dirname(catalogRequest), { recursive: true });
+      await writeFile(catalogRequest, new Date().toISOString(), 'utf8');
+      return json(response, 202, { requested: true });
+    }
     if (request.method === 'POST' && url.pathname === '/api/snapshot') {
       await mkdir(dirname(snapshotRequest), { recursive: true });
       await writeFile(snapshotRequest, new Date().toISOString(), 'utf8');

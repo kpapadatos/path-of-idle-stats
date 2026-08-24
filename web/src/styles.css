@@ -5,3 +5,13 @@
 html { color-scheme: dark; }
 body { margin: 0; min-height: 100vh; background: #09090b; color: #f4f4f5; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
 
+.rank-input {
+  appearance: textfield;
+  text-align: center;
+}
+
+.rank-input::-webkit-inner-spin-button,
+.rank-input::-webkit-outer-spin-button {
+  margin: 0;
+  -webkit-appearance: none;
+}
