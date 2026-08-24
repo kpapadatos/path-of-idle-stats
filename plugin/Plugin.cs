@@ -23,7 +23,7 @@ public sealed class Plugin : BasePlugin
 {
     public const string PluginGuid = "local.pathofidle.stats";
     public const string PluginName = "Path of Idle Stats";
-    public const string PluginVersion = "0.7.3";
+    public const string PluginVersion = "0.7.4";
 
     private static Plugin? Instance;
     private static readonly object StateLock = new();
@@ -774,6 +774,7 @@ public sealed class Plugin : BasePlugin
         var chapterSiteId = ReadNullableInt(siteRow, "id");
         var siteIndex = ReadNullableInt(siteRow, "index");
         var chapterSiteType = ReadNullableInt(siteRow, "type");
+        var adventureType = Read(battle, "advType")?.ToString();
         var englishPlaceTitle = !string.IsNullOrWhiteSpace(englishChapter) && siteIndex is not null
             ? $"{englishChapter}-{siteIndex}" : EnglishName(siteRow, placeTitle);
         var heroes = ReadList(Read(battle, "comPlayerList"))
@@ -796,7 +797,7 @@ public sealed class Plugin : BasePlugin
             capture.StartedAt,
             endedAt,
             durationSeconds = Math.Round((endedAt - capture.StartedAt).TotalSeconds, 3),
-            adventureType = Read(battle, "advType")?.ToString(),
+            adventureType,
             placeTitle,
             englishPlaceTitle,
             chapterSiteId,
@@ -805,13 +806,32 @@ public sealed class Plugin : BasePlugin
             wave = ReadNullableInt(battleMap, "enemyWave"),
             enemyCount = capture.Enemies.Count,
             enemies = capture.Enemies,
-            loot = AggregateLoot(ReadList(Read(__instance, "dropItemList")).Select(DescribeItem)),
+            loot = DescribeBattleLoot(__instance, battle, adventureType),
             resources = DescribePrimaryResources(),
             sanctum = DescribeSanctum(),
             heroes
         });
         Instance?.writer?.Enqueue("snapshot.heroes", new { heroes });
     });
+
+    private static List<Dictionary<string, object?>> DescribeBattleLoot(object field, object? battle, string? adventureType)
+    {
+        var items = ReadList(Read(field, "dropItemList")).ToList();
+        if (string.Equals(adventureType, "tower", StringComparison.OrdinalIgnoreCase))
+        {
+            // Tower boss drops are deliberately held outside AdvFieldData.dropItemList until
+            // after BattleEnd. They include the remaining Gold/Blood and occasional chests.
+            // Other adventure modes have already folded boss drops into the field list here.
+            var pointers = new HashSet<nint>(items.Select(NativePointer).Where(pointer => pointer != 0));
+            foreach (var pending in ReadList(Read(battle, "pendingBossDropList")))
+            {
+                var pointer = NativePointer(pending);
+                if (pointer != 0 && !pointers.Add(pointer)) continue;
+                items.Add(pending);
+            }
+        }
+        return AggregateLoot(items.Select(DescribeItem));
+    }
 
     private static Dictionary<string, object?> DescribeEnemy(object combat)
     {
