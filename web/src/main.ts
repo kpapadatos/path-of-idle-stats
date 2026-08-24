@@ -531,10 +531,10 @@ type TelemetryState = {
                 </div>
                 <ng-container *ngIf="currentHeroDataView() === 'stats'; else damageDoneView">
                   <div *ngIf="heroStats($any(hero), false).length; else noCurrentStats" class="divide-y divide-zinc-800">
-                    <div *ngFor="let stat of heroStats($any(hero), false); trackBy: trackStat" [attr.data-stat-key]="statKey(stat, false)" (pointerenter)="showStatTooltip($event, $any(stat))" (pointerleave)="hideTooltips()" class="flex items-center justify-between gap-4 px-2 py-2 text-sm hover:bg-zinc-800/60">
-                      <span class="min-w-0 truncate text-zinc-400">{{ statName($any(stat)) }}</span>
+                    <button type="button" *ngFor="let stat of heroStats($any(hero), false); trackBy: trackStat" [attr.data-stat-key]="statKey(stat, false)" [attr.aria-pressed]="isPinnedStat($any(stat))" (click)="togglePinnedStat($any(stat))" (pointerenter)="showStatTooltip($event, $any(stat))" (pointerleave)="hideTooltips()" class="flex w-full items-center justify-between gap-4 px-2 py-2 text-left text-sm hover:bg-zinc-800/60">
+                      <span class="flex min-w-0 items-center text-zinc-400"><span class="truncate">{{ statName($any(stat)) }}</span><span *ngIf="isPinnedStat($any(stat))" class="ml-1.5 shrink-0 text-amber-400" aria-label="Pinned">📌</span></span>
                       <span class="shrink-0 font-mono text-zinc-100">{{ statListValue($any(stat)) }}</span>
-                    </div>
+                    </button>
                   </div>
                   <ng-template #noCurrentStats><p class="py-8 text-center text-sm text-zinc-600">Refresh to capture hero stats.</p></ng-template>
                 </ng-container>
@@ -559,10 +559,10 @@ type TelemetryState = {
               <section class="rounded-xl border border-rose-950 bg-rose-950/10 p-4">
                 <h3 class="mb-3 h-5 text-center text-sm font-semibold leading-5 text-rose-200">Live combat stats<span *ngIf="selectedTimelineEntry() as entry" class="ml-2 font-normal text-rose-400/60">{{ entry.capturedAt | date:'HH:mm:ss' }}</span></h3>
                 <div *ngIf="heroStats($any(hero), true).length; else noCombatStats" class="divide-y divide-zinc-800">
-                  <div *ngFor="let stat of heroStats($any(hero), true); trackBy: trackStat" [attr.data-stat-key]="statKey(stat, true)" (pointerenter)="showStatTooltip($event, $any(stat))" (pointerleave)="hideTooltips()" class="flex items-center justify-between gap-4 px-2 py-2 text-sm hover:bg-zinc-800/60">
-                    <span class="min-w-0 truncate text-zinc-400">{{ statName($any(stat)) }}</span>
+                  <button type="button" *ngFor="let stat of heroStats($any(hero), true); trackBy: trackStat" [attr.data-stat-key]="statKey(stat, true)" [attr.aria-pressed]="isPinnedStat($any(stat))" (click)="togglePinnedStat($any(stat))" (pointerenter)="showStatTooltip($event, $any(stat))" (pointerleave)="hideTooltips()" class="flex w-full items-center justify-between gap-4 px-2 py-2 text-left text-sm hover:bg-zinc-800/60">
+                    <span class="flex min-w-0 items-center text-zinc-400"><span class="truncate">{{ statName($any(stat)) }}</span><span *ngIf="isPinnedStat($any(stat))" class="ml-1.5 shrink-0 text-amber-400" aria-label="Pinned">📌</span></span>
                     <span class="shrink-0 font-mono text-rose-100">{{ statListValue($any(stat)) }}</span>
-                  </div>
+                  </button>
                 </div>
                 <ng-template #noCombatStats><p class="py-8 text-center text-sm text-zinc-600">No live combat values were captured.</p></ng-template>
               </section>
@@ -669,6 +669,7 @@ class AppComponent implements OnInit, OnDestroy {
   readonly selectedHero = signal<any | null>(null);
   readonly selectedHeroTab = signal<'talents' | 'stats'>('stats');
   readonly currentHeroDataView = signal<'stats' | 'damage'>('stats');
+  readonly pinnedStatKeys = signal<readonly string[]>([]);
   readonly hoveredTalent = signal<any | null>(null);
   readonly hoveredStat = signal<any | null>(null);
   readonly hoveredEffect = signal<any | null>(null);
@@ -1534,6 +1535,10 @@ class AppComponent implements OnInit, OnDestroy {
         this.selectedCodexRarity.set(storedCodexRarity);
       }
       this.codexAttributeSearch.set(window.localStorage.getItem('path-of-idle-stats.codex.attribute-search') || '');
+      const storedPinnedStats = JSON.parse(window.localStorage.getItem('path-of-idle-stats.hero-stats.pinned') || '[]');
+      if (Array.isArray(storedPinnedStats)) {
+        this.pinnedStatKeys.set([...new Set(storedPinnedStats.map(value => String(value)).filter(Boolean))]);
+      }
       const storedScannerFilterGroups = JSON.parse(window.localStorage.getItem('path-of-idle-stats.scanner.filter-groups') || '[]');
       const storedScannerFilters = JSON.parse(window.localStorage.getItem('path-of-idle-stats.scanner.filters') || '[]');
       this.applyScannerPersistedState({
@@ -1737,19 +1742,38 @@ class AppComponent implements OnInit, OnDestroy {
     return `${remaining.toFixed(1)}s remaining / ${duration.toFixed(1)}s`;
   }
   statKey(stat: any, combat: boolean): string { return (combat ? 'combat:' : 'current:') + String(stat?.id ?? stat?.key); }
+  statPinKey(stat: any): string { return String(stat?.id ?? stat?.key ?? ''); }
+  isPinnedStat(stat: any): boolean { return this.pinnedStatKeys().includes(this.statPinKey(stat)); }
+  togglePinnedStat(stat: any) {
+    const key = this.statPinKey(stat);
+    if (!key) return;
+    this.hideTooltips();
+    const current = this.pinnedStatKeys();
+    const next = current.includes(key) ? current.filter(value => value !== key) : [key, ...current];
+    this.pinnedStatKeys.set(next);
+    this.writeLocalStorage('path-of-idle-stats.hero-stats.pinned', JSON.stringify(next));
+  }
   heroStats(hero: any, combat: boolean): any[] {
     const currentStats = Array.isArray(hero?.stats) ? hero.stats : null;
     const selectedStats = this.selectedTimelineEntry()?.stats;
     const combatStats = selectedStats ?? hero?.combatStats;
     if (combat && currentStats && Array.isArray(combatStats)) {
       const combatByKey = new Map(combatStats.map((stat: any) => [String(stat?.id ?? stat?.key), stat]));
-      return currentStats
+      return this.orderPinnedStats(currentStats
         .map((stat: any) => combatByKey.get(String(stat?.id ?? stat?.key)))
-        .filter((stat: any) => stat != null);
+        .filter((stat: any) => stat != null));
     }
     const stats = combat ? combatStats : currentStats;
-    if (Array.isArray(stats)) return stats;
-    return combat ? [] : Object.entries(hero?.attributes || {}).map(([key, value]) => ({ key, englishName: key, value }));
+    if (Array.isArray(stats)) return this.orderPinnedStats(stats);
+    return combat ? [] : this.orderPinnedStats(Object.entries(hero?.attributes || {}).map(([key, value]) => ({ key, englishName: key, value })));
+  }
+  private orderPinnedStats(stats: any[]): any[] {
+    const order = new Map(this.pinnedStatKeys().map((key, index) => [key, index]));
+    if (!order.size) return stats;
+    const pinned: any[] = [], unpinned: any[] = [];
+    for (const stat of stats) (order.has(this.statPinKey(stat)) ? pinned : unpinned).push(stat);
+    pinned.sort((left, right) => Number(order.get(this.statPinKey(left))) - Number(order.get(this.statPinKey(right))));
+    return [...pinned, ...unpinned];
   }
   statValue(stat: any): string {
     const value = Number(stat?.value);
