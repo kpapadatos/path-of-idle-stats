@@ -80,11 +80,29 @@ type TelemetryState = {
 
           <details class="group mt-3 rounded-xl border border-zinc-800 bg-zinc-950/70">
             <summary class="relative flex cursor-pointer list-none items-center justify-between px-3 py-2.5 text-sm font-medium text-zinc-300">
-              <span class="opacity-50">Battle history ({{ slotBattles(slot).length }}) - Rift-Star Expanse-15</span>
-              <span class="pointer-events-none absolute left-1/2 -translate-x-1/2">Avg. Time: {{ riftStarAverage(slot) }}</span>
+              <span class="flex min-w-0 items-center gap-1">
+                <span class="shrink-0 opacity-50">Battle history ({{ slotBattles(slot).length }}) -</span>
+                <button type="button" (click)="toggleMapSelector($event, slot)" class="flex min-w-0 items-center gap-1.5 rounded-md border border-zinc-700/80 bg-zinc-900/80 px-2 py-1 text-zinc-400 transition hover:border-zinc-600 hover:bg-zinc-800 hover:text-zinc-200" [attr.aria-expanded]="mapSelectorSlot() === slot" aria-haspopup="listbox">
+                  <span class="truncate">{{ selectedAverageMapLabel(slot) }}</span><i class="fa-solid fa-chevron-down shrink-0 text-[9px]" aria-hidden="true"></i>
+                </button>
+                <button type="button" (click)="$event.preventDefault(); $event.stopPropagation()" class="chapter-average-info relative flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-zinc-600 transition hover:text-zinc-300 focus-visible:text-zinc-300 focus-visible:outline-none" aria-label="How average time is calculated">
+                  <i class="fa-solid fa-circle-info text-xs" aria-hidden="true"></i>
+                  <span role="tooltip" class="chapter-average-info__tooltip pointer-events-none absolute left-1/2 top-[calc(100%+0.5rem)] z-[60] w-72 -translate-x-1/2 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-left text-xs font-normal leading-relaxed text-zinc-300 shadow-xl shadow-black/70">Average time uses only completed wins for the selected chapter in this battle slot’s retained history.</span>
+                </button>
+                <div *ngIf="mapSelectorSlot() === slot" (click)="$event.stopPropagation()" class="absolute left-3 top-[calc(100%+0.35rem)] z-50 w-[min(30rem,calc(100%-1.5rem))] rounded-xl border border-zinc-700 bg-zinc-950 p-2 shadow-2xl shadow-black/70">
+                  <input #mapSearchInput type="search" [value]="mapSearch()" (input)="setMapSearch($event)" (keydown)="$event.stopPropagation()" placeholder="Search maps" aria-label="Search maps" class="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm font-normal text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-amber-500">
+                  <div class="mt-2 max-h-72 overflow-y-auto overscroll-contain" role="listbox" [attr.aria-label]="'Average map for battle slot ' + (slot + 1)">
+                    <button *ngFor="let map of filteredAverageMaps(slot); trackBy: trackAverageMap" type="button" role="option" [attr.aria-selected]="isAverageMapSelected(slot, map)" (click)="selectAverageMap($event, slot, map)" class="flex w-full items-center rounded-lg px-3 py-2 text-left text-sm font-normal transition hover:bg-zinc-800" [class.bg-zinc-800]="isAverageMapSelected(slot, map)" [class.text-amber-300]="isAverageMapSelected(slot, map)" [class.text-zinc-300]="!isAverageMapSelected(slot, map)">
+                      <span class="truncate">{{ $any(map).label }}</span>
+                    </button>
+                    <p *ngIf="!filteredAverageMaps(slot).length" class="px-3 py-5 text-center text-sm font-normal text-zinc-600">No matching maps in this slot’s history</p>
+                  </div>
+                </div>
+              </span>
+              <span class="pointer-events-none absolute left-1/2 -translate-x-1/2">Avg. Time: {{ selectedMapAverage(slot) }}</span>
               <span class="ml-4 flex shrink-0 items-center gap-3">
-                <button type="button" (click)="$event.preventDefault(); $event.stopPropagation(); resetSlot(slot)" [disabled]="!slotBattles(slot).length" class="rounded-lg border border-rose-900 bg-rose-950/50 px-3 py-1.5 text-xs text-rose-300 hover:bg-rose-950 disabled:cursor-not-allowed disabled:opacity-40">Reset history</button>
-                <span class="text-zinc-600 transition-transform group-open:rotate-180">⌄</span>
+                <button type="button" (click)="$event.preventDefault(); $event.stopPropagation(); resetSlot(slot)" [disabled]="!slotBattles(slot).length" class="rounded-lg border border-zinc-700 bg-zinc-900/70 px-3 py-1.5 text-xs font-normal text-zinc-500 transition hover:border-zinc-600 hover:bg-zinc-800 hover:text-zinc-300 disabled:cursor-not-allowed disabled:opacity-40">Reset history</button>
+                <i class="fa-solid fa-chevron-down text-[10px] text-zinc-600 transition-transform group-open:rotate-180" aria-hidden="true"></i>
               </span>
             </summary>
             <div class="border-t border-zinc-800 p-4">
@@ -385,6 +403,13 @@ class AppComponent implements OnInit, OnDestroy {
     element.nativeElement.select();
   }
 
+  @ViewChild('mapSearchInput')
+  set mapSearchElement(element: ElementRef<HTMLInputElement> | undefined) {
+    if (!element) return;
+    element.nativeElement.focus({ preventScroll: true });
+    element.nativeElement.select();
+  }
+
   readonly battleSlots = [0, 1, 2];
   readonly heroPositions = [0, 1, 2];
   readonly codexRarities: Array<{ key: CodexRarityKey; label: string; quality: number }> = [
@@ -395,6 +420,9 @@ class AppComponent implements OnInit, OnDestroy {
     { key: 'mythic', label: 'Mythic', quality: 5 }
   ];
   readonly selectedPageTab = signal<'battles' | 'compendium' | 'codex'>('battles');
+  readonly mapSelectorSlot = signal<number | null>(null);
+  readonly mapSearch = signal('');
+  readonly selectedAverageMapKeys = signal<string[]>(['standard:Rift-Star Expanse-15', 'standard:Rift-Star Expanse-15', 'standard:Rift-Star Expanse-15']);
   readonly talentSearch = signal('');
   readonly compendiumRank = signal(1);
   readonly selectedCompendiumTalentIds = signal<ReadonlySet<number>>(new Set<number>());
@@ -559,6 +587,57 @@ class AppComponent implements OnInit, OnDestroy {
     if (tab !== currentTab && this.pageTabBody) this.pageTabBody.nativeElement.scrollTop = 0;
     if (enteringCodex) void this.refreshCodex();
   }
+  toggleMapSelector(event: Event, slot: number) {
+    event.preventDefault();
+    event.stopPropagation();
+    const opening = this.mapSelectorSlot() !== slot;
+    this.mapSearch.set('');
+    this.mapSelectorSlot.set(opening ? slot : null);
+  }
+  setMapSearch(event: Event) { this.mapSearch.set((event.target as HTMLInputElement).value); }
+  selectAverageMap(event: Event, slot: number, map: any) {
+    event.preventDefault();
+    event.stopPropagation();
+    const key = String(map?.key || '').trim();
+    if (!key) return;
+    this.selectedAverageMapKeys.update(current => current.map((value, index) => index === slot ? key : value));
+    this.writeLocalStorage(`path-of-idle-stats.battles.average-map.${slot}`, key);
+    this.mapSelectorSlot.set(null);
+    this.mapSearch.set('');
+  }
+  averageMaps(slot: number): any[] {
+    const byTitle = new Map<string, any>();
+    for (const battle of this.slotBattles(slot)) {
+      const payload = (battle as any)?.payload;
+      const title = this.battlePlaceTitle(payload).trim();
+      if (!title || title === 'Unknown place') continue;
+      const isTreasure = payload?.isTreasure === true || Number(payload?.chapterSiteType) === 2;
+      const key = this.averageMapKey(title, isTreasure);
+      byTitle.set(key, { key, title, isTreasure, label: isTreasure ? `${title} (Treasure)` : title });
+    }
+    return [...byTitle.values()].sort((left, right) => left.title.localeCompare(right.title, 'en-US', { numeric: true, sensitivity: 'base' }));
+  }
+  filteredAverageMaps(slot: number): any[] {
+    const search = this.mapSearch().trim().toLocaleLowerCase('en-US');
+    return this.averageMaps(slot).filter(map => !search || String(map?.label || '').toLocaleLowerCase('en-US').includes(search));
+  }
+  selectedAverageMapLabel(slot: number): string {
+    const key = this.normalizeAverageMapKey(this.selectedAverageMapKeys()[slot]);
+    return this.averageMaps(slot).find(map => map.key === key)?.label || this.averageMapSelection(key).title;
+  }
+  isAverageMapSelected(slot: number, map: any): boolean { return this.normalizeAverageMapKey(this.selectedAverageMapKeys()[slot]) === String(map?.key || ''); }
+  trackAverageMap(_index: number, map: any): string { return String(map?.key || ''); }
+  private averageMapKey(title: string, isTreasure: boolean): string { return `${isTreasure ? 'treasure' : 'standard'}:${title}`; }
+  private normalizeAverageMapKey(value: string | null | undefined): string {
+    const key = String(value || '').trim();
+    if (key.startsWith('standard:') || key.startsWith('treasure:')) return key;
+    return this.averageMapKey(key || 'Rift-Star Expanse-15', false);
+  }
+  private averageMapSelection(value: string): { title: string; isTreasure: boolean } {
+    const key = this.normalizeAverageMapKey(value);
+    const separator = key.indexOf(':');
+    return { title: key.slice(separator + 1), isTreasure: key.startsWith('treasure:') };
+  }
   setTalentSearch(event: Event) { this.talentSearch.set((event.target as HTMLInputElement).value); }
   setCompendiumRank(event: Event) {
     const value = (event.target as HTMLInputElement).valueAsNumber;
@@ -658,6 +737,7 @@ class AppComponent implements OnInit, OnDestroy {
         this.selectedCodexRarity.set(storedCodexRarity);
       }
       this.codexAttributeSearch.set(window.localStorage.getItem('path-of-idle-stats.codex.attribute-search') || '');
+      this.selectedAverageMapKeys.set(this.battleSlots.map(slot => this.normalizeAverageMapKey(window.localStorage.getItem(`path-of-idle-stats.battles.average-map.${slot}`))));
     } catch { /* localStorage can be unavailable in privacy-restricted contexts */ }
   }
   private writeLocalStorage(key: string, value: string) {
@@ -870,12 +950,14 @@ class AppComponent implements OnInit, OnDestroy {
     return hero?.isDead === true || (hero?.currentHealth != null && Number.isFinite(Number(hero.currentHealth)) && Number(hero.currentHealth) <= 0);
   }
   isSelectedHeroDead(): boolean { return this.isHeroDead(this.selectedHero()); }
-  riftStarAverage(slot: number): string {
-    const targetTitle = 'Rift-Star Expanse-15';
+  selectedMapAverage(slot: number): string {
+    const selectedMap = this.averageMapSelection(this.selectedAverageMapKeys()[slot]);
     const durations = this.slotBattles(slot)
       .filter(battle => {
         const payload = (battle as any).payload;
-        return payload?.result === 'win' && this.battlePlaceTitle(payload) === targetTitle;
+        if (payload?.result !== 'win' || this.battlePlaceTitle(payload) !== selectedMap.title) return false;
+        const isTreasure = payload?.isTreasure === true || Number(payload?.chapterSiteType) === 2;
+        return isTreasure === selectedMap.isTreasure;
       })
       .slice(0, 50)
       .map(battle => Number((battle as any).payload?.durationSeconds))
@@ -1001,6 +1083,10 @@ class AppComponent implements OnInit, OnDestroy {
     this.hoveredStat.set(null); this.hoveredEffect.set(null); this.hoveredTalent.set(talent);
     this.activateTooltip(event, 'talent-tooltip');
   }
+  @HostListener('document:click')
+  closeMapSelector() { this.mapSelectorSlot.set(null); this.mapSearch.set(''); }
+  @HostListener('document:keydown.escape')
+  closeMapSelectorOnEscape() { this.closeMapSelector(); }
   @HostListener('document:mouseleave')
   @HostListener('window:blur')
   hideTooltips() {

@@ -23,7 +23,7 @@ public sealed class Plugin : BasePlugin
 {
     public const string PluginGuid = "local.pathofidle.stats";
     public const string PluginName = "Path of Idle Stats";
-    public const string PluginVersion = "0.6.10";
+    public const string PluginVersion = "0.6.11";
 
     private static Plugin? Instance;
     private static readonly object StateLock = new();
@@ -668,7 +668,9 @@ public sealed class Plugin : BasePlugin
             ?? Read(Read(battleMap, "mapChapterData"), "tChapterData");
         var placeTitle = ReadString(mapSite, "titleStr") ?? ReadString(siteRow, "name");
         var englishChapter = EnglishName(chapterRow, ReadString(chapterRow, "name"));
+        var chapterSiteId = ReadNullableInt(siteRow, "id");
         var siteIndex = ReadNullableInt(siteRow, "index");
+        var chapterSiteType = ReadNullableInt(siteRow, "type");
         var englishPlaceTitle = !string.IsNullOrWhiteSpace(englishChapter) && siteIndex is not null
             ? $"{englishChapter}-{siteIndex}" : EnglishName(siteRow, placeTitle);
         var heroes = ReadList(Read(battle, "comPlayerList"))
@@ -693,6 +695,9 @@ public sealed class Plugin : BasePlugin
             adventureType = Read(battle, "advType")?.ToString(),
             placeTitle,
             englishPlaceTitle,
+            chapterSiteId,
+            chapterSiteType,
+            isTreasure = chapterSiteType == 2,
             wave = ReadNullableInt(battleMap, "enemyWave"),
             enemyCount = capture.Enemies.Count,
             enemies = capture.Enemies,
