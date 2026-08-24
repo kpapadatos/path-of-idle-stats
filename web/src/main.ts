@@ -116,9 +116,19 @@ type TelemetryState = {
               <p *ngIf="!slotBattles(slot).length" class="text-sm text-zinc-600">Waiting for this slot’s first completed battle.</p>
               <details *ngFor="let battle of slotBattles(slot); trackBy: trackBattle" class="mb-3 rounded-lg border border-zinc-800 bg-zinc-900/70">
                 <summary class="cursor-pointer list-none p-3">
-                  <div class="flex flex-wrap items-center justify-between gap-3">
-                    <div><p class="text-sm font-medium text-zinc-200">{{ $any(battle).payload?.englishPlaceTitle || $any(battle).payload?.placeTitle || placeTitleFallback($any(battle).payload) }}</p><div class="mt-1 flex items-center gap-3"><span class="rounded-md px-2 py-1 text-xs uppercase" [class]="battleResultClass($any(battle).payload?.result)">{{ $any(battle).payload?.result || 'unknown' }}</span><span class="text-sm text-zinc-300">{{ $any(battle).payload?.durationSeconds ?? '?' }}s</span></div></div>
-                    <span class="text-xs text-zinc-600">{{ $any(battle).timestamp | date:'mediumTime' }}</span>
+                  <div class="relative flex items-center justify-between gap-3">
+                    <div class="min-w-0 max-w-[22%]"><p class="truncate text-sm font-medium text-zinc-200">{{ $any(battle).payload?.englishPlaceTitle || $any(battle).payload?.placeTitle || placeTitleFallback($any(battle).payload) }}</p><div class="mt-1 flex items-center gap-3"><span class="rounded-md px-2 py-1 text-xs uppercase" [class]="battleResultClass($any(battle).payload?.result)">{{ $any(battle).payload?.result || 'unknown' }}</span><span class="text-sm text-zinc-300">{{ $any(battle).payload?.durationSeconds ?? '?' }}s</span></div></div>
+                    <div class="absolute -bottom-2.5 -top-2.5 left-1/2 grid w-[58%] -translate-x-1/2 grid-cols-3 items-center divide-x divide-zinc-800/80 rounded-lg border border-zinc-800/70 bg-zinc-950/40" aria-label="Final hero DPS">
+                      <ng-container *ngIf="$any(battle).payload?.heroes as finalHeroes">
+                        <div *ngFor="let hero of battleHeroes($any(battle), slot)" class="min-w-0 px-2 text-center">
+                          <ng-container *ngIf="battleHeroHasDamage($any(hero))">
+                            <div class="flex min-w-0 items-center justify-center gap-1.5"><img [src]="$any(hero).classIconUrl || classIconUrl($any(hero).jobId)" class="h-4 w-4 shrink-0 object-contain" alt=""><span class="truncate text-xs font-medium text-zinc-300">{{ $any(hero).name || 'Unknown hero' }}</span></div>
+                            <p class="mt-1.5 font-mono text-[15px] font-semibold leading-none text-amber-300">{{ battleHeroDps($any(hero)) }}</p>
+                          </ng-container>
+                        </div>
+                      </ng-container>
+                    </div>
+                    <span class="ml-auto text-xs text-zinc-600">{{ $any(battle).timestamp | date:'mediumTime' }}</span>
                   </div>
                 </summary>
                 <div class="border-t border-zinc-800 p-3">
@@ -1572,6 +1582,26 @@ class AppComponent implements OnInit, OnDestroy {
   slotBattles(slot: number): TelemetryEvent[] { return this.state().battles.filter(battle => Number((battle as any).payload?.battleIndex) === slot); }
   trackBattle(index: number, battle: TelemetryEvent): string {
     return String(battle.timestamp ?? `${(battle as any).payload?.battleIndex ?? 'slot'}-${index}`);
+  }
+  battleHeroes(battle: TelemetryEvent, slot: number): any[] {
+    const heroes = (battle as any)?.payload?.heroes;
+    const available = Array.isArray(heroes) ? [...heroes].reverse().slice(0, 3) : [];
+    const assigned = this.slotHeroes(slot).slice(0, 3);
+    const aligned = assigned.map(expected => available.find(hero => this.heroIdentity(hero) === this.heroIdentity(expected)) ?? null);
+    if (aligned.some(Boolean)) {
+      while (aligned.length < 3) aligned.push(null);
+      return aligned;
+    }
+    const ordered = [...available];
+    while (ordered.length < 3) ordered.push(null);
+    return ordered;
+  }
+  battleHeroHasDamage(hero: any): boolean {
+    return hero?.damageDone?.totalDps != null && Number.isFinite(Number(hero.damageDone.totalDps));
+  }
+  battleHeroDps(hero: any): string {
+    if (!hero?.damageDone || !Number.isFinite(Number(hero.damageDone.totalDps))) return 'n/a';
+    return this.compactDps(hero.damageDone.totalDps);
   }
   trackLoot(index: number, item: any): string { return `${item?.type ?? 'item'}:${item?.id ?? item?.englishName ?? index}`; }
   battleLoot(battle: TelemetryEvent): any[] {
