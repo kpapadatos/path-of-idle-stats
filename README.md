@@ -7,8 +7,9 @@ This guide is for Windows players who are not developers. Follow the steps in or
 Path of Idle Stats reads live gameplay information and displays it in a local dashboard at `http://127.0.0.1:43127`.
 
 <p align="center">
-  <img src="docs/images/dashboard-overview.png" width="49%" alt="Path of Idle Stats dashboard with resources, battle slots, battle history averages, and loot speed">
-  <img src="docs/images/hero-stats.png" width="49%" alt="Hero details showing current stats beside live combat stats">
+  <img src="docs/images/dashboard-battles.png" width="32%" alt="Path of Idle Stats battle dashboard with resources, battle slots, history averages, and loot speed">
+  <img src="docs/images/dashboard-compendium.png" width="32%" alt="Searchable Path of Idle Stats talent compendium with selected talents and rank scaling">
+  <img src="docs/images/hero-combat-stats.png" width="32%" alt="Hero combat details with a snapshot timeline, effects, and current versus live stats">
 </p>
 
 - It shows battle slots, heroes, talents, stats, battle history, loot speed, and resources.
