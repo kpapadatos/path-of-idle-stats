@@ -3,9 +3,10 @@
 Path of Idle Stats reads live gameplay information from **Path of Idle: Old Gods Rising** and displays it in a local dashboard at [http://127.0.0.1:43127](http://127.0.0.1:43127).
 
 <p align="center">
-  <img src="docs/images/dashboard-battles.png" width="32%" alt="Path of Idle Stats battle dashboard with resources, battle slots, history averages, and loot speed">
-  <img src="docs/images/dashboard-compendium.png" width="32%" alt="Searchable Path of Idle Stats talent compendium with selected talents and rank scaling">
-  <img src="docs/images/hero-combat-stats.png" width="32%" alt="Hero combat details with timeline snapshots, effects, stats, and damage meters">
+  <img src="docs/images/dashboard-battles.png" width="24%" alt="Path of Idle Stats battle dashboard with resources, battle slots, history averages, and loot speed">
+  <img src="docs/images/dashboard-compendium.png" width="24%" alt="Searchable Path of Idle Stats talent compendium with selected talents and rank scaling">
+  <img src="docs/images/hero-combat-stats.png" width="24%" alt="Hero combat details with timeline snapshots, effects, stats, and damage meters">
+  <img src="docs/images/dashboard-scanner.png" width="24%" alt="Inventory and warehouse scanner with matches, filter groups, item filters, and required attributes">
 </p>
 
 It includes battle slots and history, loot rates, resources, hero talents and live stats, combat effects, per-skill damage meters, a talent compendium, item Codex, and inventory/warehouse scanner.
