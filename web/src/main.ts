@@ -42,7 +42,7 @@ type TelemetryState = {
         <div class="mt-5 h-2 overflow-hidden rounded-full border border-zinc-800 bg-zinc-900 shadow-inner shadow-black/40">
           <div class="h-full rounded-full bg-gradient-to-r from-amber-600 via-amber-400 to-yellow-300 transition-[width] duration-200 ease-out" [style.width.%]="iconLoadingPercent()"></div>
         </div>
-        <p class="mt-3 font-mono text-sm tabular-nums text-zinc-500">{{ iconLoadingCompleted() }} / {{ iconLoadingTotal() || '…' }}</p>
+        <p *ngIf="iconLoadingTotal() > 0" class="mt-3 font-mono text-sm tabular-nums text-zinc-500">{{ iconLoadingCompleted() }} / {{ iconLoadingTotal() }}</p>
       </section>
     </div>
     <ng-template #dashboard>
