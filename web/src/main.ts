@@ -504,8 +504,8 @@ class BattleHeroDpsComponent {
             <button type="button" role="tab" (click)="selectHeroTab('talents')" [attr.aria-selected]="selectedHeroTab() === 'talents'" class="border-b-2 px-4 py-2 text-sm font-medium" [class]="selectedHeroTab() === 'talents' ? 'border-amber-400 text-amber-300' : 'border-transparent text-zinc-500 hover:text-zinc-300'">Talents</button>
           </nav>
 
-          <div class="min-h-0 flex-1 overflow-y-auto pr-1">
-          <ng-container *ngIf="selectedHeroTab() === 'talents'">
+          <div class="min-h-0 flex-1">
+          <div *ngIf="selectedHeroTab() === 'talents'" class="h-full overflow-y-auto overscroll-contain pr-1">
 
           <section *ngIf="inspiredTalents($any(hero)).length" class="mt-6 rounded-xl border border-cyan-950 bg-cyan-950/10 p-4 text-center">
             <p class="mb-3 text-xs font-semibold uppercase tracking-[0.18em] text-cyan-400">Inspired talents</p>
@@ -543,26 +543,26 @@ class BattleHeroDpsComponent {
           </ng-template>
 
           <p class="mt-3 text-xs text-zinc-600">Hover a talent or skill for its full details.</p>
-          </ng-container>
+          </div>
 
-          <section *ngIf="selectedHeroTab() === 'stats'" class="mt-6">
-            <section class="mb-4 rounded-xl border border-zinc-800 bg-zinc-900/40 px-5 py-3" aria-label="Combat stats timeline">
-              <div class="relative h-10">
+          <section *ngIf="selectedHeroTab() === 'stats'" class="flex h-full min-h-0 flex-col pt-6">
+            <section class="mb-4 shrink-0 rounded-xl border border-zinc-800 bg-zinc-900/40 px-5 py-3" aria-label="Combat stats timeline">
+              <div class="relative mx-4 h-10">
                 <div class="absolute left-0 right-0 top-1/2 h-px -translate-y-1/2 bg-zinc-700"></div>
                 <button *ngFor="let entry of timelineEntries(); let index = index; trackBy: trackTimelineEntry" type="button" (click)="selectTimelineEntry(entry.id)" [style.left.%]="timelinePosition(index)" [attr.aria-label]="timelineEntryLabel(entry, index)" class="absolute top-1/2 flex h-8 w-8 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 p-0 leading-none shadow-lg transition" [class]="selectedTimelineId() === entry.id ? 'border-amber-300 bg-amber-500 text-zinc-950' : 'border-zinc-500 bg-zinc-800 text-zinc-300 hover:border-amber-500'">
                   <span class="text-[10px] font-bold">{{ index + 1 }}</span>
                 </button>
               </div>
             </section>
-            <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
-              <div class="flex min-w-0 flex-1 flex-wrap items-center gap-x-[3px] gap-y-[5px]">
-                <button *ngFor="let effect of combatEffects(); trackBy: trackEffect" type="button" [attr.data-effect-key]="effectKey($any(effect))" (pointerenter)="showEffectTooltip($event, $any(effect))" (pointerleave)="hideTooltips()" class="relative h-[34px] w-[34px] rounded-lg border bg-zinc-950 p-1" [class]="effectBorderClass($any(effect))" [attr.aria-label]="effectTitle($any(effect))">
+            <div class="mb-3 flex h-11 w-full min-w-0 shrink-0 items-center gap-[2px] overflow-x-auto overflow-y-hidden rounded-xl border border-zinc-800 bg-zinc-900/40 p-1">
+                <button *ngFor="let effect of combatEffects(); trackBy: trackEffect" type="button" [attr.data-effect-key]="effectKey($any(effect))" (pointerenter)="showEffectTooltip($event, $any(effect))" (pointerleave)="hideTooltips()" class="relative h-[34px] w-[34px] shrink-0 rounded-lg border bg-zinc-950 p-1" [class]="effectBorderClass($any(effect))" [attr.aria-label]="effectTitle($any(effect))">
                   <img *ngIf="effectIconUrl($any(effect)) as effectIcon" [src]="effectIcon" class="h-full w-full object-contain" alt="">
-                  <span *ngIf="$any(effect).stacks > 1" class="absolute -bottom-1.5 -right-1.5 min-w-4 rounded-full border border-zinc-700 bg-zinc-950 px-1 text-center text-[9px] font-bold text-zinc-100">{{ $any(effect).stacks }}</span>
+                  <span *ngIf="$any(effect).stacks > 1" class="absolute -bottom-1 -right-1 min-w-4 rounded-full border border-zinc-700 bg-zinc-950 px-1 text-center text-[9px] font-bold text-zinc-100">{{ $any(effect).stacks }}</span>
                 </button>
-                <span *ngIf="!hasCombatEffects()" class="text-xs text-zinc-600">No active effects captured</span>
-              </div>
-              <div class="flex shrink-0 items-center gap-2">
+                <span *ngIf="!hasCombatEffects()" class="pl-[15px] text-xs text-zinc-600">Buffs and debuffs will appear here.</span>
+            </div>
+            <div class="mb-4 flex shrink-0 items-center justify-end">
+              <div class="flex items-center gap-2">
                 <button type="button" (click)="moveTimelineSelection(-1)" [disabled]="!hasPreviousTimelineEntry()" aria-label="Previous timeline snapshot" title="Previous snapshot" class="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40">←</button>
                 <button type="button" (click)="moveTimelineSelection(1)" [disabled]="!hasNextTimelineEntry()" aria-label="Next timeline snapshot" title="Next snapshot" class="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40">→</button>
                 <button type="button" (click)="clearTimeline()" [disabled]="historicalBattleContext() || !timelineEntries().length" class="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-400 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40">Clear</button>
@@ -570,7 +570,7 @@ class BattleHeroDpsComponent {
                 <button type="button" (click)="refreshHeroes(true)" [disabled]="historicalBattleContext() || refreshing() || recording()" class="rounded-lg border border-amber-800 bg-amber-950/40 px-3 py-2 text-sm text-amber-300 hover:bg-amber-950 disabled:opacity-50">Refresh</button>
               </div>
             </div>
-            <div class="grid gap-4 md:grid-cols-2">
+            <div class="grid min-h-0 flex-1 gap-4 overflow-y-auto overscroll-contain pr-1 md:grid-cols-2">
               <section class="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4">
                 <div class="mb-3 flex h-5 items-center justify-center gap-1 text-sm font-semibold" role="tablist" aria-label="Current hero data view">
                   <button type="button" role="tab" [attr.aria-selected]="currentHeroDataView() === 'stats'" (click)="selectCurrentHeroDataView('stats')" class="h-5 rounded-md px-2 leading-5 transition" [class]="currentHeroDataView() === 'stats' ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'">Current hero stats</button>

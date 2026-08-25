@@ -23,7 +23,7 @@ public sealed class Plugin : BasePlugin
 {
     public const string PluginGuid = "local.pathofidle.stats";
     public const string PluginName = "Path of Idle Stats";
-    public const string PluginVersion = "0.10.0";
+    public const string PluginVersion = "0.10.1";
 
     private static Plugin? Instance;
     private static readonly object StateLock = new();
