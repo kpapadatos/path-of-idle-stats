@@ -23,7 +23,7 @@ public sealed class Plugin : BasePlugin
 {
     public const string PluginGuid = "local.pathofidle.stats";
     public const string PluginName = "Path of Idle Stats";
-    public const string PluginVersion = "0.7.4";
+    public const string PluginVersion = "0.7.6";
 
     private static Plugin? Instance;
     private static readonly object StateLock = new();
@@ -49,6 +49,8 @@ public sealed class Plugin : BasePlugin
         harmony = new Harmony(PluginGuid);
         Patch("AdvBattleData", "Create", nameof(BattleCreatedPostfix));
         Patch("CombatData", "CreateEnemy", nameof(EnemyCreatedPostfix));
+        Patch("ActionData", "OnCastSkill", nameof(ActionCastPostfix));
+        PatchOverload("AdvTallyData", "AddData", 5, nameof(TallyDamageAddedPostfix));
         Patch("AdvFieldData", "BattleEnd", nameof(BattleEndedPostfix));
         Patch("TableData", "init", nameof(TableReadyPostfix));
         Patch("Root", "Update", nameof(RootUpdatePostfix));
@@ -347,7 +349,7 @@ public sealed class Plugin : BasePlugin
                 .Select(heroField => Read(heroField, "heroData"))
                 .Where(hero => hero is not null)
                 .Select(hero => DescribeHero(hero!, combats.FirstOrDefault(combat =>
-                    NativePointer(Read(combat, "heroData") ?? combat) == NativePointer(hero!)), tallyData, observedBattleTime))
+                    NativePointer(Read(combat, "heroData") ?? combat) == NativePointer(hero!)), tallyData, observedBattleTime, GetBattleCapture(index)))
                 .ToList();
             return new { battleIndex = index, heroes };
         }).ToList();
@@ -692,6 +694,17 @@ public sealed class Plugin : BasePlugin
         Log.LogInfo($"Hooked {typeName}.{methodName} effect context");
     }
 
+    private void PatchOverload(string typeName, string methodName, int parameterCount, string postfixName)
+    {
+        var type = GameType(typeName) ?? throw new InvalidOperationException($"Game type not found: {typeName}");
+        var original = type.GetMethods(BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+            .SingleOrDefault(method => method.Name == methodName && method.GetParameters().Length == parameterCount)
+            ?? throw new InvalidOperationException($"Game overload not found: {typeName}.{methodName}/{parameterCount}");
+        var postfix = AccessTools.Method(typeof(Plugin), postfixName) ?? throw new InvalidOperationException($"Plugin hook not found: {postfixName}");
+        harmony!.Patch(original, postfix: new HarmonyMethod(postfix));
+        Log.LogInfo($"Hooked {typeName}.{methodName}/{parameterCount}");
+    }
+
     private static void AbilityResultPrefix(object __instance, out object? __state)
     {
         __state = currentEffectSkill;
@@ -752,6 +765,54 @@ public sealed class Plugin : BasePlugin
         }
     });
 
+    private static void ActionCastPostfix(object __instance) => SafeHook("action-cast", () =>
+    {
+        var combat = Read(__instance, "ownCombatData");
+        var hero = Read(combat, "heroData");
+        var skill = Read(__instance, "ownSkillData");
+        var heroUniqueId = ReadNullableInt(Read(hero, "saveHeroData"), "uniqueId");
+        var talentId = ResolveTalentOriginId(hero, skill);
+        var battleIndex = ReadNullableInt(__instance, "fieldIndex") ?? ReadNullableInt(combat, "fieldIndex");
+        if (heroUniqueId is null || talentId is null || battleIndex is null) return;
+        lock (StateLock)
+        {
+            if (Battles.TryGetValue(battleIndex.Value, out var capture))
+                capture.IncrementCast(heroUniqueId.Value, "talent", talentId.Value);
+        }
+    });
+
+    private static int? ResolveTalentOriginId(object? hero, object? skill)
+    {
+        var directId = ReadNullableInt(Read(Read(skill, "ownTalentData"), "tTalentData"), "id");
+        if (directId is not null) return directId;
+        var skillId = ReadNullableInt(Read(skill, "tSkillData"), "id");
+        if (hero is null || skillId is null) return null;
+        foreach (var talent in ReadValues(Read(Read(hero, "heroTalentData"), "talentDic")))
+        {
+            var definition = Read(talent, "tTalentData");
+            if (ReadNullableInt(definition, "skillId") == skillId)
+                return ReadNullableInt(definition, "id");
+        }
+        return null;
+    }
+
+    private static void TallyDamageAddedPostfix(object __instance, object[] __args) => SafeHook("tally-damage-added", () =>
+    {
+        if (__args.Length < 5 || !string.Equals(__args[1]?.ToString(), "damage", StringComparison.OrdinalIgnoreCase)) return;
+        var value = Convert.ToDouble(__args[4], CultureInfo.InvariantCulture);
+        if (value <= 0) return;
+        var heroUniqueId = ReadNullableInt(Read(__args[0], "saveHeroData"), "uniqueId");
+        var originType = __args[2]?.ToString();
+        var originId = Convert.ToInt32(__args[3], CultureInfo.InvariantCulture);
+        var battleIndex = ReadNullableInt(Read(Read(__instance, "advFieldData"), "saveAdvFieldData"), "index");
+        if (heroUniqueId is null || string.IsNullOrWhiteSpace(originType) || battleIndex is null) return;
+        lock (StateLock)
+        {
+            if (Battles.TryGetValue(battleIndex.Value, out var capture))
+                capture.IncrementHit(heroUniqueId.Value, originType, originId);
+        }
+    });
+
     private static void BattleEndedPostfix(object __instance, object[] __args) => SafeHook("battle-ended", () =>
     {
         var index = ReadNullableInt(Read(__instance, "saveAdvFieldData"), "index") ?? -1;
@@ -785,7 +846,7 @@ public sealed class Plugin : BasePlugin
                 var combat = ReadList(Read(battle, "comPlayerList"))
                     .FirstOrDefault(candidate => NativePointer(Read(candidate, "heroData") ?? candidate) == NativePointer(hero!));
                 return DescribeHero(hero!, combat, Read(Read(battle, "advFieldData"), "advTallyData"),
-                    Math.Max(0, (DateTimeOffset.UtcNow - capture.StartedAt).TotalSeconds));
+                    Math.Max(0, (DateTimeOffset.UtcNow - capture.StartedAt).TotalSeconds), capture);
             }).ToList();
         EmitCatalogs();
         ExportPendingIcons(24);
@@ -845,7 +906,7 @@ public sealed class Plugin : BasePlugin
         };
     }
 
-    private static Dictionary<string, object?> DescribeHero(object hero, object? combat = null, object? tallyData = null, double? observedBattleTime = null)
+    private static Dictionary<string, object?> DescribeHero(object hero, object? combat = null, object? tallyData = null, double? observedBattleTime = null, BattleCapture? battleCapture = null)
     {
         var save = Read(hero, "saveHeroData");
         var jobId = ReadNullableInt(save, "jobId");
@@ -870,7 +931,7 @@ public sealed class Plugin : BasePlugin
             ["stats"] = DescribeStats(Read(hero, "attrData"), hero, ReadNullableInt(save, "level")),
             ["combatStats"] = DescribeStats(Read(combat, "attrData"), hero, ReadNullableInt(save, "level")),
             ["combatEffects"] = TryDescribeCombatEffects(combat),
-            ["damageDone"] = TryDescribeDamageDone(hero, tallyData, observedBattleTime),
+            ["damageDone"] = TryDescribeDamageDone(hero, tallyData, observedBattleTime, battleCapture),
             ["inCombat"] = combat is not null,
             ["currentHealth"] = currentHealth,
             ["isDead"] = combat is not null && currentHealth is <= 0,
@@ -879,10 +940,10 @@ public sealed class Plugin : BasePlugin
         };
     }
 
-    private static Dictionary<string, object?>? TryDescribeDamageDone(object hero, object? tallyData, double? observedBattleTime)
+    private static Dictionary<string, object?>? TryDescribeDamageDone(object hero, object? tallyData, double? observedBattleTime, BattleCapture? battleCapture)
     {
         if (tallyData is null) return null;
-        try { return DescribeDamageDone(hero, tallyData, observedBattleTime); }
+        try { return DescribeDamageDone(hero, tallyData, observedBattleTime, battleCapture); }
         catch (Exception error)
         {
             Instance?.Log.LogWarning($"Damage-meter extraction failed safely: {error.Message}");
@@ -890,7 +951,7 @@ public sealed class Plugin : BasePlugin
         }
     }
 
-    private static Dictionary<string, object?> DescribeDamageDone(object hero, object tallyData, double? observedBattleTime)
+    private static Dictionary<string, object?> DescribeDamageDone(object hero, object tallyData, double? observedBattleTime, BattleCapture? battleCapture)
     {
         var heroUniqueId = ReadNullableInt(Read(hero, "saveHeroData"), "uniqueId");
         var fieldData = Read(tallyData, "advFieldData");
@@ -937,6 +998,12 @@ public sealed class Plugin : BasePlugin
                 ["iconUrl"] = IconUrl(icon),
                 ["damage"] = damage,
                 ["dps"] = dps,
+                ["castCount"] = battleCapture is not null && heroUniqueId is not null && originId is not null
+                    ? battleCapture.GetCastCount(heroUniqueId.Value, originType, originId.Value)
+                    : null,
+                ["hitCount"] = battleCapture is not null && heroUniqueId is not null && originId is not null
+                    ? battleCapture.GetHitCount(heroUniqueId.Value, originType, originId.Value)
+                    : null,
                 ["share"] = ReadNullableDouble(item, "per")
             });
         }
@@ -964,6 +1031,11 @@ public sealed class Plugin : BasePlugin
                 ? Math.Max(0, (DateTimeOffset.UtcNow - capture.StartedAt).TotalSeconds)
                 : null;
         }
+    }
+
+    private static BattleCapture? GetBattleCapture(int battleIndex)
+    {
+        lock (StateLock) return Battles.TryGetValue(battleIndex, out var capture) ? capture : null;
     }
 
     private static List<Dictionary<string, object?>> TryDescribeCombatEffects(object? combat)
@@ -1774,6 +1846,28 @@ public sealed class Plugin : BasePlugin
         public DateTimeOffset StartedAt { get; }
         public List<Dictionary<string, object?>> Enemies { get; } = new();
         public List<Dictionary<string, object?>> Loot { get; } = new();
+        private Dictionary<string, int> CastCounts { get; } = new(StringComparer.OrdinalIgnoreCase);
+        private Dictionary<string, int> HitCounts { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public void IncrementCast(int heroUniqueId, string originType, int originId)
+        {
+            var key = $"{heroUniqueId}:{originType}:{originId}";
+            CastCounts[key] = CastCounts.GetValueOrDefault(key) + 1;
+        }
+        public int? GetCastCount(int heroUniqueId, string? originType, int originId)
+        {
+            if (string.IsNullOrWhiteSpace(originType)) return null;
+            return CastCounts.TryGetValue($"{heroUniqueId}:{originType}:{originId}", out var count) ? count : null;
+        }
+        public void IncrementHit(int heroUniqueId, string originType, int originId)
+        {
+            var key = $"{heroUniqueId}:{originType}:{originId}";
+            HitCounts[key] = HitCounts.GetValueOrDefault(key) + 1;
+        }
+        public int? GetHitCount(int heroUniqueId, string? originType, int originId)
+        {
+            if (string.IsNullOrWhiteSpace(originType)) return null;
+            return HitCounts.TryGetValue($"{heroUniqueId}:{originType}:{originId}", out var count) ? count : null;
+        }
     }
 
     private sealed class CodexAffixDescription

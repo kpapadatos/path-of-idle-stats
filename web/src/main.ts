@@ -547,7 +547,7 @@ type TelemetryState = {
                     <div *ngIf="damageDoneEntries().length; else noDamageEntries" class="divide-y divide-zinc-800">
                       <div *ngFor="let entry of damageDoneEntries(); trackBy: trackDamageEntry" class="flex items-center gap-3 px-2 py-2 text-sm hover:bg-zinc-800/60">
                         <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-zinc-700 bg-zinc-950 p-1"><img *ngIf="$any(entry).iconUrl" [src]="$any(entry).iconUrl" class="h-full w-full object-contain" alt=""></div>
-                        <div class="min-w-0 flex-1"><p class="truncate text-zinc-200">{{ $any(entry).englishName || $any(entry).name || 'Unknown source' }}</p><p class="text-[11px] text-zinc-600">{{ compactNumber($any(entry).damage) }} damage</p></div>
+                        <div class="min-w-0 flex-1"><p class="truncate text-zinc-200">{{ $any(entry).englishName || $any(entry).name || 'Unknown source' }}</p><p class="text-[11px] text-zinc-600">{{ compactNumber($any(entry).damage) }} damage<span *ngIf="$any(entry).castCount != null"> | Casts: {{ $any(entry).castCount }}</span><span *ngIf="$any(entry).hitCount != null"> | Hits: {{ $any(entry).hitCount }}</span></p></div>
                         <span class="shrink-0 font-mono font-semibold text-amber-200">{{ compactDps($any(entry).dps) }}</span>
                       </div>
                     </div>
