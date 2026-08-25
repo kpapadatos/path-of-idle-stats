@@ -146,7 +146,7 @@ Path of Idle
   -> BepInEx + Harmony postfix patches
   -> PathOfIdleStats.dll
   -> POST /api/events on 127.0.0.1:43127
-  -> Node in-memory state + data/events.jsonl
+  -> Node live state + data/path-of-idle-stats.sqlite
   -> Server-Sent Events /api/stream
   -> Angular dashboard
 ```
@@ -189,7 +189,7 @@ Current events include `heartbeat`, `battle.started`, `battle.ended`, `snapshot.
 
 `Root.Update` consumes and deletes the snapshot marker, then emits `snapshot.slots` and `snapshot.heroes`. This avoids waiting for battle completion. A marker may be queued while the game is closed and consumed after the game starts and a save is entered.
 
-State is currently in memory. Server restart does not replay `data/events.jsonl`. Non-catalog events append to that file; catalogs overwrite individual files in `data/catalogs/`.
+Live state is held in memory, while the retained newest 50 completed battles per slot and scanner configuration are persisted in `data/path-of-idle-stats.sqlite`. Battle history is restored at server startup, updated synchronously on every `battle.ended`, and updated by the per-slot reset endpoint. Completed battles are never appended to `data/events.jsonl`; that file is limited to smaller non-snapshot diagnostic events. The first SQLite-enabled startup migrates the newest legacy battles, commits them, and permanently deletes the old raw event log. Catalogs overwrite individual files in `data/catalogs/`.
 
 ## Dashboard product decisions
 
@@ -251,9 +251,10 @@ Catalogs cover talents, skills, abilities, materials, runes, tools, curios, and 
 
 ## Data retention and privacy
 
-- Backend keeps 50 battles per slot in memory.
+- Backend keeps and persists the newest 50 battles per slot in SQLite.
 - Rift-Star average uses all retained exact matches (up to 50).
-- `data/events.jsonl` may contain hero names, equipment, and gameplay history; it is ignored.
+- `data/path-of-idle-stats.sqlite` contains retained battle history and scanner state; it is ignored.
+- `data/events.jsonl` contains only non-snapshot, non-completed-battle diagnostic events and is ignored.
 - Catalogs and icons are ignored.
 - No telemetry is intentionally sent off-machine.
 - Public GitHub repository: [https://github.com/kpapadatos/path-of-idle-stats](https://github.com/kpapadatos/path-of-idle-stats).

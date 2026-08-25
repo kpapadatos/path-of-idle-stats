@@ -1,13 +1,13 @@
 import { createServer } from 'node:http';
-import { appendFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, open, readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import { dirname, extname, join, normalize } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const dataDirectory = join(root, 'data');
+const dataDirectory = process.env.PATH_OF_IDLE_STATS_DATA_DIR?.trim() || join(root, 'data');
 const eventLog = join(dataDirectory, 'events.jsonl');
-const scannerDatabasePath = join(dataDirectory, 'path-of-idle-stats.sqlite');
+const databasePath = join(dataDirectory, 'path-of-idle-stats.sqlite');
 const scannerBackupDirectory = join(dataDirectory, 'scanner-state-backups');
 const webRoot = join(root, 'dist', 'dashboard', 'browser');
 const gameDirectory = process.env.PATH_OF_IDLE_GAME_DIR?.trim() || 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\PathOfIdle';
@@ -31,8 +31,8 @@ try {
   const savedIconProgress = JSON.parse(await readFile(iconProgressFile, 'utf8'));
   if (Number.isInteger(savedIconProgress?.total) && Number.isInteger(savedIconProgress?.completed)) state.iconProgress = savedIconProgress;
 } catch { }
-const scannerDatabase = new DatabaseSync(scannerDatabasePath);
-scannerDatabase.exec(`
+const database = new DatabaseSync(databasePath);
+database.exec(`
   PRAGMA journal_mode = WAL;
   PRAGMA synchronous = FULL;
   CREATE TABLE IF NOT EXISTS scanner_state (
@@ -40,12 +40,148 @@ scannerDatabase.exec(`
     state_json TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS battle_history_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    history_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS runtime_migrations (
+    migration_key TEXT PRIMARY KEY,
+    completed_at TEXT NOT NULL
+  );
 `);
-const readScannerStateStatement = scannerDatabase.prepare('SELECT state_json, updated_at FROM scanner_state WHERE id = 1');
-const writeScannerStateStatement = scannerDatabase.prepare(`
+const readScannerStateStatement = database.prepare('SELECT state_json, updated_at FROM scanner_state WHERE id = 1');
+const writeScannerStateStatement = database.prepare(`
   INSERT INTO scanner_state (id, state_json, updated_at) VALUES (1, ?, ?)
   ON CONFLICT(id) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at
 `);
+const readBattleHistoryStatement = database.prepare('SELECT history_json, updated_at FROM battle_history_state WHERE id = 1');
+const writeBattleHistoryStatement = database.prepare(`
+  INSERT INTO battle_history_state (id, history_json, updated_at) VALUES (1, ?, ?)
+  ON CONFLICT(id) DO UPDATE SET history_json = excluded.history_json, updated_at = excluded.updated_at
+`);
+const readMigrationStatement = database.prepare('SELECT completed_at FROM runtime_migrations WHERE migration_key = ?');
+const writeMigrationStatement = database.prepare(`
+  INSERT OR REPLACE INTO runtime_migrations (migration_key, completed_at) VALUES (?, ?)
+`);
+const battleHistoryMigrationKey = 'battle-history-from-events-jsonl-v1';
+
+function battleSlot(event) {
+  const slot = Number(event?.payload?.battleIndex);
+  return Number.isInteger(slot) && slot >= 0 && slot <= 2 ? slot : null;
+}
+
+function retainBattleHistory(events) {
+  const perSlot = new Map();
+  return events.filter(event => {
+    if (event?.type !== 'battle.ended') return false;
+    const slot = battleSlot(event);
+    if (slot == null) return false;
+    const count = perSlot.get(slot) ?? 0;
+    if (count >= 50) return false;
+    perSlot.set(slot, count + 1);
+    return true;
+  });
+}
+
+function deduplicateBattleHistory(events) {
+  const seen = new Set();
+  return retainBattleHistory(events.filter(event => {
+    const key = JSON.stringify(event);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }));
+}
+
+function readBattleHistory() {
+  const row = readBattleHistoryStatement.get();
+  if (!row) return null;
+  const parsed = JSON.parse(row.history_json);
+  if (!Array.isArray(parsed)) throw new Error('Persisted battle history is not an array.');
+  return { battles: retainBattleHistory(parsed), updatedAt: row.updated_at };
+}
+
+function persistBattleHistory(battles) {
+  const retained = retainBattleHistory(battles);
+  const updatedAt = new Date().toISOString();
+  writeBattleHistoryStatement.run(JSON.stringify(retained), updatedAt);
+  return retained;
+}
+
+async function readNewestLegacyBattles(newerThan = null) {
+  let file;
+  try { file = await open(eventLog, 'r'); } catch (error) {
+    if (error?.code === 'ENOENT') return [];
+    throw error;
+  }
+  const battles = [];
+  const perSlot = new Map();
+  const cutoff = newerThan ? Date.parse(newerThan) : Number.NaN;
+  let reachedCutoff = false;
+  const chunkSize = 1024 * 1024;
+  let remainder = Buffer.alloc(0);
+  try {
+    let position = (await file.stat()).size;
+    while (position > 0 && !reachedCutoff && [0, 1, 2].some(slot => (perSlot.get(slot) ?? 0) < 50)) {
+      const length = Math.min(chunkSize, position);
+      position -= length;
+      const chunk = Buffer.allocUnsafe(length);
+      const { bytesRead } = await file.read(chunk, 0, length, position);
+      const data = Buffer.concat([chunk.subarray(0, bytesRead), remainder]);
+      let lineEnd = data.length;
+      for (let index = data.length - 1; index >= 0; index--) {
+        if (data[index] !== 10) continue;
+        const line = data.subarray(index + 1, lineEnd).toString('utf8').replace(/\r$/, '').trim();
+        lineEnd = index;
+        if (!line) continue;
+        try {
+          const event = JSON.parse(line);
+          const eventTime = Date.parse(event?.timestamp);
+          if (Number.isFinite(cutoff) && Number.isFinite(eventTime) && eventTime <= cutoff) {
+            reachedCutoff = true;
+            break;
+          }
+          const slot = event?.type === 'battle.ended' ? battleSlot(event) : null;
+          if (slot == null || (perSlot.get(slot) ?? 0) >= 50) continue;
+          perSlot.set(slot, (perSlot.get(slot) ?? 0) + 1);
+          battles.push(event);
+        } catch { }
+      }
+      remainder = data.subarray(0, lineEnd);
+    }
+    if (!reachedCutoff && position === 0 && remainder.length > 0) {
+      try {
+        const event = JSON.parse(remainder.toString('utf8').replace(/\r$/, '').trim());
+        const slot = event?.type === 'battle.ended' ? battleSlot(event) : null;
+        if (slot != null && (perSlot.get(slot) ?? 0) < 50) battles.push(event);
+      } catch { }
+    }
+  } finally { await file.close(); }
+  return retainBattleHistory(battles);
+}
+
+async function deleteLegacyEventLog() {
+  try { await unlink(eventLog); } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+}
+
+async function initializeBattleHistory() {
+  const stored = readBattleHistory();
+  if (readMigrationStatement.get(battleHistoryMigrationKey)) {
+    state.battles = stored?.battles ?? [];
+    return;
+  }
+  const legacyBattles = await readNewestLegacyBattles(stored?.updatedAt ?? null);
+  const migrated = stored ? deduplicateBattleHistory([...legacyBattles, ...stored.battles]) : legacyBattles;
+  state.battles = persistBattleHistory(migrated);
+  await deleteLegacyEventLog();
+  writeMigrationStatement.run(battleHistoryMigrationKey, new Date().toISOString());
+  console.log('Legacy event log removed after battle history migration.');
+}
+
+await initializeBattleHistory();
 
 function readScannerState() {
   const row = readScannerStateStatement.get();
@@ -104,15 +240,7 @@ function applyEvent(event) {
   if (event.type === 'battle.ended') {
     state.resources = event.payload?.resources ?? state.resources;
     state.sanctum = event.payload?.sanctum ?? state.sanctum;
-    state.battles.unshift(event);
-    const perSlot = new Map();
-    state.battles = state.battles.filter(battle => {
-      const slot = Number(battle.payload?.battleIndex);
-      const count = perSlot.get(slot) ?? 0;
-      if (count >= 50) return false;
-      perSlot.set(slot, count + 1);
-      return true;
-    });
+    state.battles = persistBattleHistory([event, ...state.battles]);
   }
   const message = `data: ${JSON.stringify(publicState(false))}\n\n`;
   for (const client of clients) client.write(message);
@@ -187,7 +315,7 @@ const server = createServer(async (request, response) => {
     }
     if (request.method === 'DELETE' && /^\/api\/battles\/[0-2]$/.test(url.pathname)) {
       const slot = Number(url.pathname.slice(-1));
-      state.battles = state.battles.filter(battle => Number(battle.payload?.battleIndex) !== slot);
+      state.battles = persistBattleHistory(state.battles.filter(battle => battleSlot(battle) !== slot));
       broadcastState();
       return json(response, 200, { reset: true, slot });
     }
@@ -206,7 +334,7 @@ const server = createServer(async (request, response) => {
         const catalogDirectory = join(dataDirectory, 'catalogs');
         await mkdir(catalogDirectory, { recursive: true });
         await import('node:fs/promises').then(({ writeFile }) => writeFile(join(catalogDirectory, event.type.slice(8) + '.json'), JSON.stringify(event.payload), 'utf8'));
-      } else if (event.type !== 'heartbeat' && !event.type.startsWith('snapshot.')) {
+      } else if (event.type !== 'heartbeat' && event.type !== 'battle.ended' && !event.type.startsWith('snapshot.')) {
         await appendFile(eventLog, JSON.stringify(event) + '\n', 'utf8');
       }
       applyEvent(event);
