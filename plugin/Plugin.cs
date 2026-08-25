@@ -23,7 +23,7 @@ public sealed class Plugin : BasePlugin
 {
     public const string PluginGuid = "local.pathofidle.stats";
     public const string PluginName = "Path of Idle Stats";
-    public const string PluginVersion = "0.8.0";
+    public const string PluginVersion = "0.9.0";
 
     private static Plugin? Instance;
     private static readonly object StateLock = new();
@@ -32,6 +32,7 @@ public sealed class Plugin : BasePlugin
     private static readonly Dictionary<int, BattleCapture> Battles = new();
     private static readonly Queue<string> PendingIcons = new();
     private static readonly HashSet<string> KnownIcons = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly HashSet<string> ExportedRuntimeSpriteKeys = new(StringComparer.OrdinalIgnoreCase);
     private static bool catalogSent;
     private static float nextCombatSnapshotRequestCheck;
     private static float nextSnapshotRequestCheck;
@@ -91,6 +92,7 @@ public sealed class Plugin : BasePlugin
             ExportPendingIcons(exportCount);
             ReportIconProgress();
         }
+        CaptureDueBattleTimelines(now);
         if (now >= nextCombatSnapshotRequestCheck)
         {
             nextCombatSnapshotRequestCheck = now + 0.05f;
@@ -445,6 +447,72 @@ public sealed class Plugin : BasePlugin
             ["currentHealth"] = currentHealth,
             ["isDead"] = combat is not null && currentHealth is <= 0
         };
+    }
+
+    private static void CaptureDueBattleTimelines(float now)
+    {
+        List<BattleCapture> due;
+        lock (StateLock) due = Battles.Values.Where(capture => capture.TryScheduleTimelineCapture(now)).ToList();
+        if (due.Count == 0) return;
+
+        var dataMgr = ReadStatic("Game", "dataMgr");
+        var advData = Read(Read(dataMgr, "nowSeasonData"), "advData");
+        var fields = ReadList(Read(advData, "advFieldList"))
+            .Select((field, fallbackIndex) => new
+            {
+                Field = field,
+                Index = ReadNullableInt(Read(field, "saveAdvFieldData"), "index") ?? fallbackIndex
+            })
+            .ToDictionary(entry => entry.Index, entry => entry.Field);
+        foreach (var capture in due)
+            if (fields.TryGetValue(capture.Index, out var field)) CaptureBattleTimeline(capture, field, now, force: false);
+    }
+
+    private static void CaptureBattleTimeline(BattleCapture capture, object field, float now, bool force)
+    {
+        if (force && !capture.ShouldCaptureFinalTimeline(now)) return;
+        var captureTimer = System.Diagnostics.Stopwatch.StartNew();
+        var battle = Read(field, "advBattleData");
+        if (battle is null) return;
+        var combats = ReadList(Read(battle, "comPlayerList")).ToList();
+        if (combats.Count == 0) return;
+        var tallyData = Read(field, "advTallyData");
+        var observedBattleTime = Math.Max(0, (DateTimeOffset.UtcNow - capture.StartedAt).TotalSeconds);
+        var elapsedSeconds = Math.Max(0, now - capture.RealtimeStartedAt);
+        var displayedEffectBars = FindDisplayedCombatEffectBars();
+        foreach (var combat in combats)
+        {
+            var hero = Read(combat, "heroData");
+            var save = Read(hero, "saveHeroData");
+            var heroUniqueId = ReadNullableInt(save, "uniqueId");
+            if (hero is null || heroUniqueId is null) continue;
+            capture.AddTimelineSnapshot(
+                heroUniqueId.Value,
+                elapsedSeconds,
+                DescribeCompactStats(Read(combat, "attrData")),
+                TryDescribeCombatEffects(combat, displayedEffectBars),
+                TryDescribeDamageDone(hero, tallyData, observedBattleTime, capture));
+        }
+        capture.MarkTimelineCaptured(now);
+        captureTimer.Stop();
+        capture.RecordTimelineCaptureDuration(captureTimer.Elapsed.TotalMilliseconds);
+    }
+
+    private static List<object?[]> DescribeCompactStats(object? attrData)
+    {
+        var output = new List<object?[]>();
+        if (attrData is null) return output;
+        var enumType = GameType("EAttrType");
+        var getter = attrData.GetType().GetMethod("GetAttrValue", BindingFlags.Instance | BindingFlags.Public);
+        if (enumType is null || getter is null) return output;
+        foreach (var enumValue in Enum.GetValues(enumType)) try
+        {
+            var value = Convert.ToSingle(getter.Invoke(attrData, new[] { enumValue }), CultureInfo.InvariantCulture);
+            if (Math.Abs(value) <= 0.00001f) continue;
+            output.Add(new object?[] { Convert.ToInt32(enumValue, CultureInfo.InvariantCulture), value });
+        }
+        catch { }
+        return output;
     }
 
     private static void EmitCodexSnapshot()
@@ -832,7 +900,7 @@ public sealed class Plugin : BasePlugin
     {
         if (__result is null) return;
         var index = ReadInt(__result, "fieldIndex");
-        lock (StateLock) Battles[index] = new BattleCapture(index, DateTimeOffset.UtcNow);
+        lock (StateLock) Battles[index] = new BattleCapture(index, DateTimeOffset.UtcNow, Time.realtimeSinceStartup);
         Instance?.writer?.Enqueue("battle.started", new
         {
             battleIndex = index,
@@ -847,7 +915,7 @@ public sealed class Plugin : BasePlugin
         var index = Convert.ToInt32(__args[0], CultureInfo.InvariantCulture);
         lock (StateLock)
         {
-            if (!Battles.TryGetValue(index, out var capture)) Battles[index] = capture = new BattleCapture(index, DateTimeOffset.UtcNow);
+            if (!Battles.TryGetValue(index, out var capture)) Battles[index] = capture = new BattleCapture(index, DateTimeOffset.UtcNow, Time.realtimeSinceStartup);
             capture.Enemies.Add(DescribeEnemy(__result));
         }
     });
@@ -936,9 +1004,11 @@ public sealed class Plugin : BasePlugin
         BattleCapture capture;
         lock (StateLock)
         {
-            if (!Battles.TryGetValue(index, out capture!)) capture = new BattleCapture(index, DateTimeOffset.UtcNow);
-            Battles[index] = new BattleCapture(index, DateTimeOffset.UtcNow);
+            if (!Battles.TryGetValue(index, out capture!)) capture = new BattleCapture(index, DateTimeOffset.UtcNow, Time.realtimeSinceStartup);
+            Battles.Remove(index);
         }
+        CaptureBattleTimeline(capture, __instance, Time.realtimeSinceStartup, force: true);
+        Instance?.Log.LogDebug(capture.TimelinePerformanceSummary());
         var battle = Read(__instance, "advBattleData");
         var battleMap = Read(battle, "battleMapData");
         var mapSite = Read(battleMap, "mapSiteData");
@@ -986,7 +1056,8 @@ public sealed class Plugin : BasePlugin
             loot = DescribeBattleLoot(__instance, battle, adventureType),
             resources = DescribePrimaryResources(),
             sanctum = DescribeSanctum(),
-            heroes
+            heroes,
+            combatTimelines = capture.DescribeTimelines()
         });
         Instance?.writer?.Enqueue("snapshot.heroes", new { heroes });
     });
@@ -1160,9 +1231,9 @@ public sealed class Plugin : BasePlugin
         lock (StateLock) return Battles.TryGetValue(battleIndex, out var capture) ? capture : null;
     }
 
-    private static List<Dictionary<string, object?>> TryDescribeCombatEffects(object? combat)
+    private static List<Dictionary<string, object?>> TryDescribeCombatEffects(object? combat, IReadOnlyDictionary<nint, object>? displayedEffectBars = null)
     {
-        try { return DescribeCombatEffects(combat); }
+        try { return DescribeCombatEffects(combat, displayedEffectBars); }
         catch (Exception error)
         {
             Instance?.Log.LogWarning($"Combat effect extraction failed safely: {error.Message}");
@@ -1170,10 +1241,13 @@ public sealed class Plugin : BasePlugin
         }
     }
 
-    private static List<Dictionary<string, object?>> DescribeCombatEffects(object? combat)
+    private static List<Dictionary<string, object?>> DescribeCombatEffects(object? combat, IReadOnlyDictionary<nint, object>? displayedEffectBars)
     {
         if (combat is null) return new();
-        var displayedEffects = DescribeDisplayedCombatEffects(combat);
+        var displayedEffects = displayedEffectBars is null
+            ? DescribeDisplayedCombatEffects(combat)
+            : displayedEffectBars.TryGetValue(NativePointer(combat), out var bar)
+                ? DescribeDisplayedCombatEffects(combat, bar) : new();
         if (displayedEffects.Count > 0) return displayedEffects;
 
         var abilities = ReadList(Read(Read(combat, "comAbilityData"), "abilityList"))
@@ -1199,36 +1273,54 @@ public sealed class Plugin : BasePlugin
 
     private static List<Dictionary<string, object?>> DescribeDisplayedCombatEffects(object combat)
     {
+        var bars = FindDisplayedCombatEffectBars();
+        return bars.TryGetValue(NativePointer(combat), out var bar)
+            ? DescribeDisplayedCombatEffects(combat, bar) : new();
+    }
+
+    private static Dictionary<nint, object> FindDisplayedCombatEffectBars()
+    {
+        var result = new Dictionary<nint, object>();
         var barType = GameType("BarCombatCell");
-        if (barType is null) return new();
+        if (barType is null) return result;
         object? bars;
         try
         {
             var finder = typeof(Resources).GetMethod("FindObjectsOfTypeAll", new[] { typeof(Type) });
             bars = finder?.Invoke(null, new object[] { barType });
         }
-        catch { return new(); }
+        catch { return result; }
 
         foreach (var bar in ReadSequence(bars))
         {
-            if (NativePointer(Read(bar, "combatData")!) != NativePointer(combat)) continue;
-            var result = new List<Dictionary<string, object?>>();
-            foreach (var cell in ReadList(Read(bar, "abilityCellList")))
-            {
-                var ability = Read(cell, "abilityData");
-                if (ability is null) continue;
-                var table = Read(ability, "tAbilityData");
-                if (table is null || ReadNullableInt(table, "type") is not (>= 1 and <= 7)) continue;
-                var sprite = Read(Read(cell, "iconImg"), "sprite") as Sprite;
-                var spriteName = sprite is null ? null : ReadString(sprite, "name");
-                var iconKey = sprite is null ? null : $"displayed_effect_{ReadNullableInt(table, "id")}_{spriteName ?? "sprite"}";
-                if (sprite is not null && iconKey is not null) ExportSprite(sprite, iconKey);
-                result.Add(DescribeCombatEffect(combat, ability, Math.Max(1, ReadNullableInt(cell, "floor") ?? 1), iconKey, "game-ui"));
-            }
-            return result.OrderBy(effect => Convert.ToString(effect["classification"], CultureInfo.InvariantCulture))
-                .ThenBy(effect => Convert.ToString(effect["englishName"], CultureInfo.InvariantCulture)).ToList();
+            var pointer = NativePointer(Read(bar, "combatData")!);
+            if (pointer != 0) result[pointer] = bar;
         }
-        return new();
+        return result;
+    }
+
+    private static List<Dictionary<string, object?>> DescribeDisplayedCombatEffects(object combat, object bar)
+    {
+        var result = new List<Dictionary<string, object?>>();
+        foreach (var cell in ReadList(Read(bar, "abilityCellList")))
+        {
+            var ability = Read(cell, "abilityData");
+            if (ability is null) continue;
+            var table = Read(ability, "tAbilityData");
+            if (table is null || ReadNullableInt(table, "type") is not (>= 1 and <= 7)) continue;
+            var sprite = Read(Read(cell, "iconImg"), "sprite") as Sprite;
+            var spriteName = sprite is null ? null : ReadString(sprite, "name");
+            var iconKey = sprite is null ? null : $"displayed_effect_{ReadNullableInt(table, "id")}_{spriteName ?? "sprite"}";
+            if (sprite is not null && iconKey is not null)
+            {
+                var shouldExport = false;
+                lock (StateLock) shouldExport = ExportedRuntimeSpriteKeys.Add(iconKey);
+                if (shouldExport && !ExportSprite(sprite, iconKey)) lock (StateLock) ExportedRuntimeSpriteKeys.Remove(iconKey);
+            }
+            result.Add(DescribeCombatEffect(combat, ability, Math.Max(1, ReadNullableInt(cell, "floor") ?? 1), iconKey, "game-ui"));
+        }
+        return result.OrderBy(effect => Convert.ToString(effect["classification"], CultureInfo.InvariantCulture))
+            .ThenBy(effect => Convert.ToString(effect["englishName"], CultureInfo.InvariantCulture)).ToList();
     }
 
     private static Dictionary<string, object?> DescribeCombatEffect(object targetCombat, object ability, int stacks, string? displayedIconKey, string representation)
@@ -2032,15 +2124,54 @@ public sealed class Plugin : BasePlugin
 
     private sealed class BattleCapture
     {
-        public BattleCapture(int index, DateTimeOffset startedAt) { Index = index; StartedAt = startedAt; }
+        public BattleCapture(int index, DateTimeOffset startedAt, float realtimeStartedAt)
+        {
+            Index = index;
+            StartedAt = startedAt;
+            RealtimeStartedAt = realtimeStartedAt;
+            NextTimelineCaptureAt = realtimeStartedAt + 0.25f + Math.Max(0, index) * 0.15f;
+        }
         public int Index { get; }
         public DateTimeOffset StartedAt { get; }
+        public float RealtimeStartedAt { get; }
         public List<Dictionary<string, object?>> Enemies { get; } = new();
         public List<Dictionary<string, object?>> Loot { get; } = new();
+        private float NextTimelineCaptureAt { get; set; }
+        private float LastTimelineCaptureAt { get; set; } = -1f;
+        private Dictionary<int, HeroTimelineCapture> HeroTimelines { get; } = new();
+        private double TimelineCaptureTotalMilliseconds { get; set; }
+        private double TimelineCaptureMaximumMilliseconds { get; set; }
+        private int TimelineCaptureBatches { get; set; }
         private Dictionary<string, int> CastCounts { get; } = new(StringComparer.OrdinalIgnoreCase);
         private Dictionary<string, int> HitCounts { get; } = new(StringComparer.OrdinalIgnoreCase);
         private Dictionary<string, int> CriticalCounts { get; } = new(StringComparer.OrdinalIgnoreCase);
         private Dictionary<string, int> MissCounts { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public bool TryScheduleTimelineCapture(float now)
+        {
+            if (now < NextTimelineCaptureAt) return false;
+            do { NextTimelineCaptureAt += 1f; } while (NextTimelineCaptureAt <= now);
+            return true;
+        }
+        public bool ShouldCaptureFinalTimeline(float now) => LastTimelineCaptureAt < 0f || now - LastTimelineCaptureAt >= 0.25f;
+        public void MarkTimelineCaptured(float now) => LastTimelineCaptureAt = now;
+        public void RecordTimelineCaptureDuration(double milliseconds)
+        {
+            TimelineCaptureBatches++;
+            TimelineCaptureTotalMilliseconds += milliseconds;
+            TimelineCaptureMaximumMilliseconds = Math.Max(TimelineCaptureMaximumMilliseconds, milliseconds);
+        }
+        public string TimelinePerformanceSummary() => $"Battle slot {Index} timeline: {TimelineCaptureBatches} batches, "
+            + $"{(TimelineCaptureBatches == 0 ? 0 : TimelineCaptureTotalMilliseconds / TimelineCaptureBatches):F2} ms average, "
+            + $"{TimelineCaptureMaximumMilliseconds:F2} ms maximum.";
+        public void AddTimelineSnapshot(int heroUniqueId, double elapsedSeconds, List<object?[]> stats,
+            List<Dictionary<string, object?>> effects, Dictionary<string, object?>? damageDone)
+        {
+            if (!HeroTimelines.TryGetValue(heroUniqueId, out var timeline))
+                HeroTimelines[heroUniqueId] = timeline = new HeroTimelineCapture(heroUniqueId);
+            timeline.AddSnapshot(elapsedSeconds, stats, effects, damageDone);
+        }
+        public List<Dictionary<string, object?>> DescribeTimelines() => HeroTimelines.Values
+            .OrderBy(timeline => timeline.HeroUniqueId).Select(timeline => timeline.Describe()).ToList();
         public void IncrementCast(int heroUniqueId, string originType, int originId)
         {
             var key = $"{heroUniqueId}:{originType}:{originId}";
@@ -2080,6 +2211,107 @@ public sealed class Plugin : BasePlugin
         {
             if (string.IsNullOrWhiteSpace(originType)) return null;
             return MissCounts.GetValueOrDefault($"{heroUniqueId}:{originType}:{originId}");
+        }
+    }
+
+    private sealed class HeroTimelineCapture
+    {
+        private static readonly HashSet<string> EffectDynamicFields = new(StringComparer.Ordinal)
+            { "runtimeId", "stacks", "level", "duration", "elapsedDuration" };
+        private static readonly HashSet<string> DamageDynamicFields = new(StringComparer.Ordinal)
+            { "damage", "dps", "castCount", "hitCount", "criticalCount", "missCount", "share" };
+        private readonly Dictionary<string, int> effectDefinitionIndexes = new(StringComparer.Ordinal);
+        private readonly List<Dictionary<string, object?>> effectDefinitions = new();
+        private readonly Dictionary<string, int> damageDefinitionIndexes = new(StringComparer.Ordinal);
+        private readonly List<Dictionary<string, object?>> damageDefinitions = new();
+        private readonly List<Dictionary<string, object?>> snapshots = new();
+
+        public HeroTimelineCapture(int heroUniqueId) => HeroUniqueId = heroUniqueId;
+        public int HeroUniqueId { get; }
+
+        public void AddSnapshot(double elapsedSeconds, List<object?[]> stats, List<Dictionary<string, object?>> effects,
+            Dictionary<string, object?>? damageDone)
+        {
+            var compactEffects = effects.Select(effect => new object?[]
+            {
+                EffectDefinitionIndex(effect),
+                effect.GetValueOrDefault("runtimeId"),
+                effect.GetValueOrDefault("stacks"),
+                effect.GetValueOrDefault("level"),
+                effect.GetValueOrDefault("duration"),
+                effect.GetValueOrDefault("elapsedDuration")
+            }).ToList();
+            snapshots.Add(new()
+            {
+                ["elapsedSeconds"] = Math.Round(elapsedSeconds, 3),
+                ["stats"] = stats,
+                ["effects"] = compactEffects,
+                ["damageDone"] = CompactDamageDone(damageDone)
+            });
+        }
+
+        public Dictionary<string, object?> Describe() => new()
+        {
+            ["heroUniqueId"] = HeroUniqueId,
+            ["effectDefinitions"] = effectDefinitions,
+            ["damageDefinitions"] = damageDefinitions,
+            ["snapshots"] = snapshots
+        };
+
+        private int EffectDefinitionIndex(Dictionary<string, object?> effect)
+        {
+            var key = string.Join("|", new[]
+            {
+                Convert.ToString(effect.GetValueOrDefault("definitionId"), CultureInfo.InvariantCulture),
+                Convert.ToString(effect.GetValueOrDefault("sourceHeroId"), CultureInfo.InvariantCulture),
+                Convert.ToString(effect.GetValueOrDefault("sourceSkillId"), CultureInfo.InvariantCulture),
+                Convert.ToString(effect.GetValueOrDefault("originKind"), CultureInfo.InvariantCulture),
+                Convert.ToString(effect.GetValueOrDefault("originName"), CultureInfo.InvariantCulture),
+                Convert.ToString(effect.GetValueOrDefault("representation"), CultureInfo.InvariantCulture)
+            });
+            if (effectDefinitionIndexes.TryGetValue(key, out var existing)) return existing;
+            var index = effectDefinitions.Count;
+            effectDefinitionIndexes[key] = index;
+            effectDefinitions.Add(effect.Where(entry => !EffectDynamicFields.Contains(entry.Key))
+                .ToDictionary(entry => entry.Key, entry => entry.Value));
+            return index;
+        }
+
+        private Dictionary<string, object?>? CompactDamageDone(Dictionary<string, object?>? damageDone)
+        {
+            if (damageDone is null) return null;
+            var compactEntries = new List<object?[]>();
+            if (damageDone.GetValueOrDefault("entries") is IEnumerable<Dictionary<string, object?>> entries)
+                foreach (var entry in entries) compactEntries.Add(new object?[]
+                {
+                    DamageDefinitionIndex(entry),
+                    entry.GetValueOrDefault("damage"),
+                    entry.GetValueOrDefault("dps"),
+                    entry.GetValueOrDefault("castCount"),
+                    entry.GetValueOrDefault("hitCount"),
+                    entry.GetValueOrDefault("criticalCount"),
+                    entry.GetValueOrDefault("missCount"),
+                    entry.GetValueOrDefault("share")
+                });
+            return new()
+            {
+                ["battleTimeSeconds"] = damageDone.GetValueOrDefault("battleTimeSeconds"),
+                ["battleTimeSource"] = damageDone.GetValueOrDefault("battleTimeSource"),
+                ["totalDamage"] = damageDone.GetValueOrDefault("totalDamage"),
+                ["totalDps"] = damageDone.GetValueOrDefault("totalDps"),
+                ["entries"] = compactEntries
+            };
+        }
+
+        private int DamageDefinitionIndex(Dictionary<string, object?> entry)
+        {
+            var key = Convert.ToString(entry.GetValueOrDefault("key"), CultureInfo.InvariantCulture) ?? "unknown";
+            if (damageDefinitionIndexes.TryGetValue(key, out var existing)) return existing;
+            var index = damageDefinitions.Count;
+            damageDefinitionIndexes[key] = index;
+            damageDefinitions.Add(entry.Where(field => !DamageDynamicFields.Contains(field.Key))
+                .ToDictionary(field => field.Key, field => field.Value));
+            return index;
         }
     }
 

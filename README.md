@@ -102,7 +102,7 @@ The uninstaller only removes files recorded as introduced by this project and re
 
 ## Privacy
 
-No telemetry is intentionally sent outside your PC. Local data may contain hero names, equipment, battle history, and scanner configuration. It is stored under the extracted project's `data` directory and excluded from Git. The newest 50 battles per slot are persisted in `data\path-of-idle-stats.sqlite`, survive dashboard restarts, and are removed from that database when you use **Reset history**.
+No telemetry is intentionally sent outside your PC. Local data may contain hero names, equipment, battle history, one-second combat timelines, and scanner configuration. It is stored under the extracted project's `data` directory and excluded from Git. The newest 50 battles per slot and their compressed combat timelines are persisted in `data\path-of-idle-stats.sqlite`, survive dashboard restarts, and are removed from that database when you use **Reset history**.
 
 ## Development
 

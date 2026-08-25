@@ -4,6 +4,7 @@ import { appendFile, mkdir, open, readFile, stat, unlink, writeFile } from 'node
 import { dirname, extname, join, normalize } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
+import { gzipSync, gunzipSync } from 'node:zlib';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const dataDirectory = process.env.PATH_OF_IDLE_STATS_DATA_DIR?.trim() || join(root, 'data');
@@ -25,10 +26,11 @@ const codexRequest = join(telemetryDirectory, 'codex.request');
 const inventoryRequest = join(telemetryDirectory, 'inventory.request');
 const iconProgressFile = join(telemetryDirectory, 'icons.progress.json');
 const clients = new Set();
-const state = { connected: false, gameRunning: false, updatedAt: null, snapshotUpdatedAt: null, inventoryUpdatedAt: null, inventoryItemAdded: null, iconProgress: null, heroes: [], slots: [], resources: [], sanctum: null, inventory: [], battles: [], events: [], catalogs: {} };
+const state = { connected: false, gameRunning: false, updatedAt: null, snapshotUpdatedAt: null, slotsUpdatedAt: null, inventoryUpdatedAt: null, inventoryItemAdded: null, iconProgress: null, heroes: [], slots: [], resources: [], sanctum: null, inventory: [], battles: [], events: [], catalogs: {} };
 let codexSnapshot = { updatedAt: null, items: [], affixPools: [], rarities: [] };
 let lastGameHeartbeat = 0;
 const pendingCombatSnapshots = new Map();
+const battleHistoryLimitPerSlot = 50;
 await mkdir(dataDirectory, { recursive: true });
 try {
   const savedIconProgress = JSON.parse(await readFile(iconProgressFile, 'utf8'));
@@ -52,6 +54,11 @@ database.exec(`
     migration_key TEXT PRIMARY KEY,
     completed_at TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS battle_timelines (
+    battle_id TEXT PRIMARY KEY,
+    timeline_gzip BLOB NOT NULL,
+    created_at TEXT NOT NULL
+  );
 `);
 const readScannerStateStatement = database.prepare('SELECT state_json, updated_at FROM scanner_state WHERE id = 1');
 const writeScannerStateStatement = database.prepare(`
@@ -67,6 +74,12 @@ const readMigrationStatement = database.prepare('SELECT completed_at FROM runtim
 const writeMigrationStatement = database.prepare(`
   INSERT OR REPLACE INTO runtime_migrations (migration_key, completed_at) VALUES (?, ?)
 `);
+const readBattleTimelineStatement = database.prepare('SELECT timeline_gzip FROM battle_timelines WHERE battle_id = ?');
+const writeBattleTimelineStatement = database.prepare(`
+  INSERT OR REPLACE INTO battle_timelines (battle_id, timeline_gzip, created_at) VALUES (?, ?, ?)
+`);
+const listBattleTimelineIdsStatement = database.prepare('SELECT battle_id FROM battle_timelines');
+const deleteBattleTimelineStatement = database.prepare('DELETE FROM battle_timelines WHERE battle_id = ?');
 const battleHistoryMigrationKey = 'battle-history-from-events-jsonl-v1';
 
 function battleSlot(event) {
@@ -81,7 +94,7 @@ function retainBattleHistory(events) {
     const slot = battleSlot(event);
     if (slot == null) return false;
     const count = perSlot.get(slot) ?? 0;
-    if (count >= 50) return false;
+    if (count >= battleHistoryLimitPerSlot) return false;
     perSlot.set(slot, count + 1);
     return true;
   });
@@ -105,11 +118,43 @@ function readBattleHistory() {
   return { battles: retainBattleHistory(parsed), updatedAt: row.updated_at };
 }
 
-function persistBattleHistory(battles) {
+function persistBattleHistory(battles, timelineRecord = null) {
   const retained = retainBattleHistory(battles);
   const updatedAt = new Date().toISOString();
-  writeBattleHistoryStatement.run(JSON.stringify(retained), updatedAt);
+  const retainedTimelineIds = new Set(retained
+    .map(event => event?.payload?.timelineAvailable ? event.payload.battleId : null)
+    .filter(id => typeof id === 'string' && id.length > 0));
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    if (timelineRecord) writeBattleTimelineStatement.run(timelineRecord.battleId, timelineRecord.compressed, updatedAt);
+    writeBattleHistoryStatement.run(JSON.stringify(retained), updatedAt);
+    for (const row of listBattleTimelineIdsStatement.all())
+      if (!retainedTimelineIds.has(row.battle_id)) deleteBattleTimelineStatement.run(row.battle_id);
+    database.exec('COMMIT');
+  } catch (error) {
+    database.exec('ROLLBACK');
+    throw error;
+  }
   return retained;
+}
+
+function detachBattleTimeline(event) {
+  const timelines = event?.payload?.combatTimelines;
+  if (!Array.isArray(timelines) || timelines.length === 0) return { event, timelineRecord: null };
+  const battleId = randomUUID();
+  const timeline = {
+    battleId,
+    battleIndex: battleSlot(event),
+    startedAt: event.payload?.startedAt ?? null,
+    endedAt: event.payload?.endedAt ?? event.timestamp ?? null,
+    heroes: timelines
+  };
+  const payload = { ...event.payload, battleId, timelineAvailable: true };
+  delete payload.combatTimelines;
+  return {
+    event: { ...event, payload },
+    timelineRecord: { battleId, compressed: gzipSync(Buffer.from(JSON.stringify(timeline), 'utf8'), { level: 6 }) }
+  };
 }
 
 async function readNewestLegacyBattles(newerThan = null) {
@@ -126,7 +171,7 @@ async function readNewestLegacyBattles(newerThan = null) {
   let remainder = Buffer.alloc(0);
   try {
     let position = (await file.stat()).size;
-    while (position > 0 && !reachedCutoff && [0, 1, 2].some(slot => (perSlot.get(slot) ?? 0) < 50)) {
+    while (position > 0 && !reachedCutoff && [0, 1, 2].some(slot => (perSlot.get(slot) ?? 0) < battleHistoryLimitPerSlot)) {
       const length = Math.min(chunkSize, position);
       position -= length;
       const chunk = Buffer.allocUnsafe(length);
@@ -146,7 +191,7 @@ async function readNewestLegacyBattles(newerThan = null) {
             break;
           }
           const slot = event?.type === 'battle.ended' ? battleSlot(event) : null;
-          if (slot == null || (perSlot.get(slot) ?? 0) >= 50) continue;
+          if (slot == null || (perSlot.get(slot) ?? 0) >= battleHistoryLimitPerSlot) continue;
           perSlot.set(slot, (perSlot.get(slot) ?? 0) + 1);
           battles.push(event);
         } catch { }
@@ -157,7 +202,7 @@ async function readNewestLegacyBattles(newerThan = null) {
       try {
         const event = JSON.parse(remainder.toString('utf8').replace(/\r$/, '').trim());
         const slot = event?.type === 'battle.ended' ? battleSlot(event) : null;
-        if (slot != null && (perSlot.get(slot) ?? 0) < 50) battles.push(event);
+        if (slot != null && (perSlot.get(slot) ?? 0) < battleHistoryLimitPerSlot) battles.push(event);
       } catch { }
     }
   } finally { await file.close(); }
@@ -173,7 +218,9 @@ async function deleteLegacyEventLog() {
 async function initializeBattleHistory() {
   const stored = readBattleHistory();
   if (readMigrationStatement.get(battleHistoryMigrationKey)) {
-    state.battles = stored?.battles ?? [];
+    // Re-apply the current retention policy on startup as well as insertion so
+    // lowering the limit immediately prunes both history and orphan timelines.
+    state.battles = persistBattleHistory(stored?.battles ?? []);
     return;
   }
   const legacyBattles = await readNewestLegacyBattles(stored?.updatedAt ?? null);
@@ -214,12 +261,16 @@ async function persistScannerState(value, onlyIfEmpty = false) {
   return { imported: !existing, state: normalizedState, updatedAt };
 }
 
-function applyEvent(event) {
+function applyEvent(event, timelineRecord = null) {
+  const gameWasRunning = state.gameRunning;
   state.connected = true;
   state.updatedAt = event.timestamp;
   if (event.type === 'heartbeat') {
     lastGameHeartbeat = Date.now();
     state.gameRunning = true;
+    // Heartbeats only maintain liveness. Broadcasting an unchanged full state
+    // every second needlessly wakes Angular and recreates decoded JSON objects.
+    if (gameWasRunning) return;
   }
   if (!event.type.startsWith('catalog.') && !event.type.startsWith('snapshot.') && event.type !== 'heartbeat') {
     state.events.unshift(event);
@@ -228,7 +279,10 @@ function applyEvent(event) {
   if (event.type.startsWith('snapshot.') && event.type !== 'snapshot.icon-progress') state.snapshotUpdatedAt = event.timestamp;
   if (event.type === 'snapshot.icon-progress') state.iconProgress = event.payload ?? null;
   if (event.type === 'snapshot.heroes') state.heroes = event.payload?.heroes ?? event.payload ?? [];
-  if (event.type === 'snapshot.slots') state.slots = event.payload?.slots ?? [];
+  if (event.type === 'snapshot.slots') {
+    state.slots = event.payload?.slots ?? [];
+    state.slotsUpdatedAt = event.timestamp;
+  }
   if (event.type === 'snapshot.resources') {
     state.resources = event.payload?.resources ?? [];
     state.sanctum = event.payload?.sanctum ?? state.sanctum;
@@ -243,17 +297,62 @@ function applyEvent(event) {
   if (event.type === 'battle.ended') {
     state.resources = event.payload?.resources ?? state.resources;
     state.sanctum = event.payload?.sanctum ?? state.sanctum;
-    state.battles = persistBattleHistory([event, ...state.battles]);
+    state.battles = persistBattleHistory([event, ...state.battles], timelineRecord);
   }
   const message = `data: ${JSON.stringify(publicState(false))}\n\n`;
   for (const client of clients) client.write(message);
 }
 
 function publicState(includeInventory = true) {
-  const { catalogs, ...live } = state;
-  if (includeInventory) return live;
+  const { catalogs, events, heroes, ...live } = state;
+  const battles = live.battles.map(publicBattleSummary);
+  if (includeInventory) return { ...live, battles, events: [], heroes: [] };
   const { inventory, ...streamable } = live;
-  return streamable;
+  return { ...streamable, battles, events: [], heroes: [] };
+}
+
+const publicBattleSummaryCache = new WeakMap();
+function publicBattleSummary(event) {
+  const cached = event && typeof event === 'object' ? publicBattleSummaryCache.get(event) : null;
+  if (cached) return cached;
+  const payload = event?.payload ?? {};
+  const { enemies, resources, sanctum, heroes, loot, ...summary } = payload;
+  const result = {
+    ...event,
+    payload: {
+      ...summary,
+      heroes: (Array.isArray(heroes) ? heroes : []).map(hero => ({
+        uniqueId: hero?.uniqueId,
+        id: hero?.id,
+        name: hero?.name,
+        job: hero?.job,
+        englishJob: hero?.englishJob,
+        jobId: hero?.jobId,
+        classIconUrl: hero?.classIconUrl,
+        level: hero?.level,
+        damageDone: hero?.damageDone ? {
+          battleTimeSeconds: hero.damageDone.battleTimeSeconds,
+          totalDamage: hero.damageDone.totalDamage,
+          totalDps: hero.damageDone.totalDps
+        } : null
+      })),
+      loot: (Array.isArray(loot) ? loot : []).map(item => ({
+        id: item?.id,
+        name: item?.name,
+        englishName: item?.englishName,
+        type: item?.type,
+        count: item?.count,
+        quality: item?.quality,
+        qualityName: item?.qualityName,
+        rarity: item?.rarity,
+        level: item?.level,
+        iconKey: item?.iconKey,
+        iconUrl: item?.iconUrl
+      }))
+    }
+  };
+  if (event && typeof event === 'object') publicBattleSummaryCache.set(event, result);
+  return result;
 }
 
 async function requestCombatSnapshot(heroUniqueId) {
@@ -357,6 +456,22 @@ const server = createServer(async (request, response) => {
       broadcastState();
       return json(response, 200, { reset: true, slot });
     }
+    const battleTimelineMatch = url.pathname.match(/^\/api\/battle-timelines\/([a-f0-9-]+)\/heroes\/(\d+)$/);
+    if (request.method === 'GET' && battleTimelineMatch) {
+      const [, battleId, heroIdText] = battleTimelineMatch;
+      const row = readBattleTimelineStatement.get(battleId);
+      if (!row) return json(response, 404, { error: 'Battle timeline was not found.' });
+      const timeline = JSON.parse(gunzipSync(row.timeline_gzip).toString('utf8'));
+      const heroUniqueId = Number(heroIdText);
+      const hero = Array.isArray(timeline?.heroes)
+        ? timeline.heroes.find(entry => Number(entry?.heroUniqueId) === heroUniqueId) : null;
+      if (!hero) return json(response, 404, { error: 'Hero timeline was not found for this battle.' });
+      const retainedBattle = state.battles.find(entry => entry?.payload?.battleId === battleId);
+      const heroData = Array.isArray(retainedBattle?.payload?.heroes)
+        ? retainedBattle.payload.heroes.find(entry => Number(entry?.uniqueId) === heroUniqueId) ?? null
+        : null;
+      return json(response, 200, { battleId, startedAt: timeline.startedAt, endedAt: timeline.endedAt, hero, heroData });
+    }
     if (request.method === 'GET' && url.pathname === '/api/stream') {
       response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
       response.write(`data: ${JSON.stringify(publicState(false))}\n\n`);
@@ -379,7 +494,10 @@ const server = createServer(async (request, response) => {
       } else if (event.type !== 'heartbeat' && event.type !== 'battle.ended' && !event.type.startsWith('snapshot.')) {
         await appendFile(eventLog, JSON.stringify(event) + '\n', 'utf8');
       }
-      applyEvent(event);
+      if (event.type === 'battle.ended') {
+        const detached = detachBattleTimeline(event);
+        applyEvent(detached.event, detached.timelineRecord);
+      } else applyEvent(event);
       return json(response, 202, { accepted: true });
     }
     if (request.method === 'GET' && url.pathname.startsWith('/assets/icons/')) {

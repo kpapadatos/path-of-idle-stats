@@ -185,12 +185,13 @@ Current events include `heartbeat`, `battle.started`, `battle.ended`, `snapshot.
 - `POST /api/events` — ingestion, limited to 1 MB.
 - `POST /api/snapshot` — creates `<game>\BepInEx\PathOfIdleStats\snapshot.request`.
 - `POST /api/combat-snapshot` — correlated request/response capture for one hero. It creates `combat-snapshot.request`, waits for the matching `snapshot.combat`, and returns the payload directly without broadcasting or replacing dashboard state.
+- `GET /api/battle-timelines/:battleId/heroes/:heroId` — decompresses and returns only the requested hero's retained one-second timeline for a historical battle.
 - `DELETE /api/battles/0`, `/1`, or `/2` — clears one slot's history.
 - `GET /assets/icons/<sha256>.png` — local extracted icons.
 
 `Root.Update` consumes and deletes the general snapshot marker, then emits `snapshot.slots` and `snapshot.heroes`. Timeline capture uses a separate hero-specific path: the request carries `requestId` and `heroUniqueId`, the plugin extracts only live stats, effects, health/death state, and damage-meter data for that hero, and the backend resolves only the matching browser request. The telemetry writer drains immediately when an event is enqueued rather than polling every 250 ms. A general marker may be queued while the game is closed and consumed after the game starts and a save is entered.
 
-Live state is held in memory, while the retained newest 50 completed battles per slot and scanner configuration are persisted in `data/path-of-idle-stats.sqlite`. Battle history is restored at server startup, updated synchronously on every `battle.ended`, and updated by the per-slot reset endpoint. Completed battles are never appended to `data/events.jsonl`; that file is limited to smaller non-snapshot diagnostic events. The first SQLite-enabled startup migrates the newest legacy battles, commits them, and permanently deletes the old raw event log. Catalogs overwrite individual files in `data/catalogs/`.
+Live state is held in memory, while the retained newest 50 completed battles per slot and scanner configuration are persisted in `data/path-of-idle-stats.sqlite`. Historical combat timelines are gzip-compressed into a separate `battle_timelines` table and referenced from their owning battle by an opaque ID. History insertion, timeline insertion, retention pruning, and orphan-timeline deletion happen in one SQLite transaction. Battle history is restored at server startup, updated synchronously on every `battle.ended`, and updated by the per-slot reset endpoint. Completed battles are never appended to `data/events.jsonl`; that file is limited to smaller non-snapshot diagnostic events. The first SQLite-enabled startup migrates the newest legacy battles, commits them, and permanently deletes the old raw event log. Catalogs overwrite individual files in `data/catalogs/`.
 
 ## Dashboard product decisions
 
@@ -208,7 +209,7 @@ The dashboard intentionally contains only the header/status controls, three batt
 
 ### Battle history
 
-- Retain the newest 50 completed battles per slot; drop the oldest on insertion.
+- Retain the newest 50 completed battles per slot; drop the oldest and its timeline on insertion.
 - History expands, but individual battles start collapsed.
 - **Reset history** appears inside expanded history and clears only that slot.
 - Show exact English place, outcome, duration, timestamp, enemy count, wave, mode, and loot.
@@ -230,7 +231,8 @@ The dashboard intentionally contains only the header/status controls, three batt
 - Mutated skills are unpositioned, non-inspired skills that are not basic.
 - Tooltips show English name, rank, optional description, skill ID, and tags.
 - Talents legitimately have no description; never show “No description available.”
-- The Angular root component uses `ChangeDetectionStrategy.OnPush`; live SSE updates flow through signals, and battle rows use stable tracking keys to avoid unnecessary DOM replacement.
+- Every Angular component uses `ChangeDetectionStrategy.OnPush`. Historical DPS controls are isolated OnPush components with stable battle/hero tracking keys. The client reconciles immutable battle IDs and reuses existing battle object/array references, so unrelated telemetry cannot recreate retained rows or interrupt hover state.
+- Heartbeats only broadcast when game-running status changes. Normal heartbeat acknowledgements update server liveness without waking Angular. Public state and SSE omit unused raw-event/general-hero collections and contain cached lightweight battle summaries (metadata, compact hero DPS summary, and compact loot); enemies and full historical hero data stay server-side and are fetched only by the historical-timeline endpoint. With all three live slot snapshots present, this reduced the measured 150-battle state payload from about 49 MB to about 1.5 MB.
 - Tooltip behavior is document-level: `pointermove`, `elementFromPoint`, nearest `[data-talent-id]`, fixed positioning, viewport-edge flipping, `pointer-events: none`, and immediate clearing off-tile, on document leave, window blur, or modal close. Ordinary SSE/battle updates must not clear an active tooltip.
 - Keep tooltip DOM outside overflow-clipped grid regions.
 
@@ -240,6 +242,8 @@ The dashboard intentionally contains only the header/status controls, three batt
 - Stats contains two side-by-side lists: `HeroData.attrData` for current/base values and the matching `CombatData.attrData` for live combat values.
 - The **Refresh** button uses the correlated hero-specific combat endpoint, always adds the returned capture to the timeline, and updates the open hero without rebuilding all slots/heroes.
 - Recording uses the same serialized capture path at a one-second cadence; it never overlaps requests and still stops on hero death, manual stop, or the selected slot's battle transition.
+- Historical timelines do not use the browser recording path. The plugin owns a staggered one-second schedule for each active battle slot, samples the slot's three heroes in one batch, and removes that capture at `BattleEnd`, so the seven-second intermission produces no samples. Compact snapshots use numeric stat pairs plus battle-local interned effect and damage definitions to minimize Unity allocation, transport, and storage cost.
+- Clicking a hero's DPS summary in a retained battle lazily requests only that hero's timeline. The regular hero dialog opens in read-only historical context: timeline navigation works, while Clear, Record, and Refresh cannot alter the retained snapshots. Opening a hero from the current battle-slot card keeps the normal empty/manual timeline behavior.
 - Match each hero to combat state through `AdvFieldData.advBattleData.comPlayerList` and the combat object's `heroData` pointer.
 - Enumerate every nonzero `EAttrType`, including normally hidden/internal modifiers. Use `TAttr` for English names/descriptions and retain the enum key plus numeric ID for transparency.
 - Use `AttrInfoData.Create`, `SetOwnHeroData`, `GetDesc`, `GetSpecialDesc`, and `GetExplain` for the game's resolved derived explanations. Pass the hero's level for both base and combat attributes.
@@ -255,6 +259,7 @@ Catalogs cover talents, skills, abilities, materials, runes, tools, curios, and 
 
 - Backend keeps and persists the newest 50 battles per slot in SQLite.
 - Rift-Star average uses all retained exact matches (up to 50).
+- Historical combat timelines belong to their battle, are stored gzip-compressed in SQLite, and are deleted transactionally when that battle is reset or falls out of retention.
 - `data/path-of-idle-stats.sqlite` contains retained battle history and scanner state; it is ignored.
 - `data/events.jsonl` contains only non-snapshot, non-completed-battle diagnostic events and is ignored.
 - Catalogs and icons are ignored.

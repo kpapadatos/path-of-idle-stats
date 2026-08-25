@@ -1,6 +1,6 @@
 import 'zone.js';
 import { CommonModule } from '@angular/common';
-import { ChangeDetectionStrategy, Component, computed, ElementRef, HostListener, NgZone, OnDestroy, OnInit, signal, ViewChild } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, ElementRef, HostListener, input, NgZone, OnDestroy, OnInit, output, signal, ViewChild } from '@angular/core';
 import { bootstrapApplication } from '@angular/platform-browser';
 
 type TelemetryEvent = { type: string; timestamp?: string; payload?: unknown } & Record<string, unknown>;
@@ -17,6 +17,7 @@ type TelemetryState = {
   gameRunning: boolean;
   updatedAt: string | null;
   snapshotUpdatedAt?: string | null;
+  slotsUpdatedAt?: string | null;
   inventoryUpdatedAt?: string | null;
   inventoryItemAdded?: TelemetryEvent | null;
   iconProgress?: IconProgress | null;
@@ -31,10 +32,33 @@ type TelemetryState = {
 };
 
 @Component({
+  selector: 'app-battle-hero-dps',
+  standalone: true,
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { class: 'block min-w-0' },
+  template: `
+    <button type="button" (click)="selected.emit($event)" [disabled]="!timelineAvailable()" class="w-full rounded-md py-1 transition hover:bg-zinc-800/80 disabled:cursor-default disabled:hover:bg-transparent" [attr.aria-label]="(hero().name || 'Unknown hero') + ' ' + dpsLabel()">
+      <div class="flex min-w-0 items-center justify-center gap-1.5">
+        <img [src]="classIconUrl()" class="h-4 w-4 shrink-0 object-contain" alt="">
+        <span class="truncate text-xs font-medium text-zinc-300">{{ hero().name || 'Unknown hero' }}</span>
+      </div>
+      <p class="mt-1.5 font-mono text-[15px] font-semibold leading-none text-amber-300">{{ dpsLabel() }}</p>
+    </button>
+  `
+})
+class BattleHeroDpsComponent {
+  readonly hero = input.required<any>();
+  readonly timelineAvailable = input(false);
+  readonly classIconUrl = input('');
+  readonly dpsLabel = input('n/a');
+  readonly selected = output<Event>();
+}
+
+@Component({
   selector: 'app-root',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [CommonModule],
+  imports: [CommonModule, BattleHeroDpsComponent],
   template: `
     <div *ngIf="showIconLoader(); else dashboard" class="flex h-dvh items-center justify-center bg-zinc-950 px-6" role="status" aria-live="polite">
       <section class="w-full max-w-sm text-center">
@@ -133,11 +157,14 @@ type TelemetryState = {
                     <div class="min-w-0 max-w-[22%]"><p class="truncate text-sm font-medium text-zinc-200">{{ $any(battle).payload?.englishPlaceTitle || $any(battle).payload?.placeTitle || placeTitleFallback($any(battle).payload) }}</p><div class="mt-1 flex items-center gap-3"><span class="rounded-md px-2 py-1 text-xs uppercase" [class]="battleResultClass($any(battle).payload?.result)">{{ $any(battle).payload?.result || 'unknown' }}</span><span class="text-sm text-zinc-300">{{ $any(battle).payload?.durationSeconds ?? '?' }}s</span></div></div>
                     <div class="absolute -bottom-2.5 -top-2.5 left-1/2 grid w-[58%] -translate-x-1/2 grid-cols-3 items-center divide-x divide-zinc-800/80 rounded-lg border border-zinc-800/70 bg-zinc-950/40" aria-label="Final hero DPS">
                       <ng-container *ngIf="$any(battle).payload?.heroes as finalHeroes">
-                        <div *ngFor="let hero of battleHeroes($any(battle), slot)" class="min-w-0 px-2 text-center">
-                          <ng-container *ngIf="battleHeroHasDamage($any(hero))">
-                            <div class="flex min-w-0 items-center justify-center gap-1.5"><img [src]="$any(hero).classIconUrl || classIconUrl($any(hero).jobId)" class="h-4 w-4 shrink-0 object-contain" alt=""><span class="truncate text-xs font-medium text-zinc-300">{{ $any(hero).name || 'Unknown hero' }}</span></div>
-                            <p class="mt-1.5 font-mono text-[15px] font-semibold leading-none text-amber-300">{{ battleHeroDps($any(hero)) }}</p>
-                          </ng-container>
+                        <div *ngFor="let hero of battleHeroes($any(battle), slot); trackBy: trackBattleHero" class="min-w-0 px-2 text-center">
+                          <app-battle-hero-dps *ngIf="battleHeroHasDamage($any(hero))"
+                            [hero]="$any(hero)"
+                            [timelineAvailable]="!!$any(battle).payload?.timelineAvailable"
+                            [classIconUrl]="$any(hero).classIconUrl || classIconUrl($any(hero).jobId)"
+                            [dpsLabel]="battleHeroDps($any(hero))"
+                            (selected)="openHistoricalHero($event, $any(battle), $any(hero))">
+                          </app-battle-hero-dps>
                         </div>
                       </ng-container>
                     </div>
@@ -460,6 +487,7 @@ type TelemetryState = {
             <div>
               <h2 class="text-xl font-semibold text-zinc-100">{{ $any(hero).name || 'Unnamed hero' }}</h2>
               <div class="mt-1 flex items-center gap-2 text-sm text-amber-300"><img [src]="$any(hero).classIconUrl || classIconUrl($any(hero).jobId)" class="h-5 w-5 object-contain" alt="">{{ $any(hero).englishJob || $any(hero).job || 'Unknown class' }} · Level {{ $any(hero).level ?? '?' }}</div>
+              <p *ngIf="historicalBattleContext() as historic" class="mt-1 text-xs text-zinc-500">Historic battle · {{ $any(historic).title }} · {{ $any(historic).durationSeconds }}s</p>
             </div>
             <button type="button" (click)="closeHero()" class="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-400 hover:bg-zinc-800 hover:text-white">Close</button>
           </header>
@@ -530,9 +558,9 @@ type TelemetryState = {
               <div class="flex shrink-0 items-center gap-2">
                 <button type="button" (click)="moveTimelineSelection(-1)" [disabled]="!hasPreviousTimelineEntry()" aria-label="Previous timeline snapshot" title="Previous snapshot" class="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40">←</button>
                 <button type="button" (click)="moveTimelineSelection(1)" [disabled]="!hasNextTimelineEntry()" aria-label="Next timeline snapshot" title="Next snapshot" class="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40">→</button>
-                <button type="button" (click)="clearTimeline()" [disabled]="!timelineEntries().length" class="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-400 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40">Clear</button>
-                <button type="button" (click)="toggleRecording()" [disabled]="(refreshing() && !recording()) || (!recording() && isSelectedHeroDead())" class="rounded-lg border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50" [class]="recording() ? 'border-rose-700 bg-rose-950/50 text-rose-300' : 'border-emerald-800 bg-emerald-950/40 text-emerald-300 hover:bg-emerald-950'">{{ recording() ? 'Stop' : 'Record' }}</button>
-                <button type="button" (click)="refreshHeroes(true)" [disabled]="refreshing() || recording()" class="rounded-lg border border-amber-800 bg-amber-950/40 px-3 py-2 text-sm text-amber-300 hover:bg-amber-950 disabled:opacity-50">Refresh</button>
+                <button type="button" (click)="clearTimeline()" [disabled]="historicalBattleContext() || !timelineEntries().length" class="rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-400 hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40">Clear</button>
+                <button type="button" (click)="toggleRecording()" [disabled]="historicalBattleContext() || (refreshing() && !recording()) || (!recording() && isSelectedHeroDead())" class="rounded-lg border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50" [class]="recording() ? 'border-rose-700 bg-rose-950/50 text-rose-300' : 'border-emerald-800 bg-emerald-950/40 text-emerald-300 hover:bg-emerald-950'">{{ recording() ? 'Stop' : 'Record' }}</button>
+                <button type="button" (click)="refreshHeroes(true)" [disabled]="historicalBattleContext() || refreshing() || recording()" class="rounded-lg border border-amber-800 bg-amber-950/40 px-3 py-2 text-sm text-amber-300 hover:bg-amber-950 disabled:opacity-50">Refresh</button>
               </div>
             </div>
             <div class="grid gap-4 md:grid-cols-2">
@@ -681,6 +709,8 @@ class AppComponent implements OnInit, OnDestroy {
   readonly scannerTooltip = signal<{ kind: 'match'; item: ScannerMatch } | { kind: 'disabled'; items: any[] } | { kind: 'auto' } | null>(null);
   readonly catalogs = signal<Record<string, any[]>>({});
   readonly selectedHero = signal<any | null>(null);
+  readonly historicalBattleContext = signal<any | null>(null);
+  readonly historicalTimelineLoading = signal(false);
   readonly selectedHeroTab = signal<'talents' | 'stats'>('stats');
   readonly currentHeroDataView = signal<'stats' | 'damage'>('stats');
   readonly pinnedStatKeys = signal<readonly string[]>([]);
@@ -810,6 +840,7 @@ class AppComponent implements OnInit, OnDestroy {
   private recordingSession = 0;
   private recordingBattleSlot: number | null = null;
   private recordingBattleMarker: string | null = null;
+  private historicalTimelineRequest = 0;
   private tooltipFrame?: number;
   private tooltipValidationFrame?: number;
   private activeTooltipId?: string;
@@ -880,7 +911,7 @@ class AppComponent implements OnInit, OnDestroy {
     this.stream.onerror = () => this.status.set('Reconnecting');
     this.stream.onmessage = event => {
       const previousSnapshotTimestamp = this.latestSlotSnapshotTimestamp(this.state());
-      const next = { ...this.state(), ...JSON.parse(event.data), catalogs: this.catalogs() } as TelemetryState;
+      const next = this.reconcileTelemetryState(this.state(), JSON.parse(event.data));
       this.state.set(next);
       if (next.iconProgress?.complete && Number(next.iconProgress?.total) > 0) this.iconLoadingFinished.set(true);
       this.handleInventoryItemAdded(next.inventoryItemAdded || null);
@@ -893,7 +924,7 @@ class AppComponent implements OnInit, OnDestroy {
       const selected = this.selectedHero();
       if (!selected) return;
       const fresh = next.slots.flatMap(slot => slot.heroes as any[]).find(hero => this.heroIdentity(hero) === this.heroIdentity(selected));
-      if (fresh && this.latestSlotSnapshotTimestamp(next) !== previousSnapshotTimestamp) {
+      if (!this.historicalBattleContext() && fresh && this.latestSlotSnapshotTimestamp(next) !== previousSnapshotTimestamp) {
         this.selectedHero.set(fresh);
         this.scheduleTooltipAnchorValidation();
         if (this.recording() && this.isHeroDead(fresh)) this.stopRecording();
@@ -1628,9 +1659,34 @@ class AppComponent implements OnInit, OnDestroy {
       }
     } catch { /* The next page load can request the catalog again. */ }
   }
+  private reconcileTelemetryState(current: TelemetryState, incoming: Partial<TelemetryState>): TelemetryState {
+    const decodedBattles = Array.isArray(incoming.battles) ? incoming.battles : current.battles;
+    const previousBattles = new Map(current.battles.map((battle, index) => [this.battleIdentity(battle, index), battle]));
+    const reconciledBattles = decodedBattles.map((battle, index) => previousBattles.get(this.battleIdentity(battle, index)) ?? battle);
+    const battles = reconciledBattles.length === current.battles.length
+      && reconciledBattles.every((battle, index) => battle === current.battles[index])
+      ? current.battles
+      : reconciledBattles;
+    const slots = Array.isArray(incoming.slots) && incoming.slotsUpdatedAt !== current.slotsUpdatedAt
+      ? incoming.slots
+      : current.slots;
+    return { ...current, ...incoming, battles, slots, catalogs: this.catalogs() } as TelemetryState;
+  }
+  private battleIdentity(battle: TelemetryEvent, index: number): string {
+    const payload = (battle as any)?.payload;
+    return String(payload?.battleId
+      ?? battle.timestamp
+      ?? `${payload?.battleIndex ?? 'slot'}:${payload?.startedAt ?? payload?.endedAt ?? index}`);
+  }
   slotBattles(slot: number): TelemetryEvent[] { return this.state().battles.filter(battle => Number((battle as any).payload?.battleIndex) === slot); }
   trackBattle(index: number, battle: TelemetryEvent): string {
-    return String(battle.timestamp ?? `${(battle as any).payload?.battleIndex ?? 'slot'}-${index}`);
+    const payload = (battle as any)?.payload;
+    return String(payload?.battleId
+      ?? battle.timestamp
+      ?? `${payload?.battleIndex ?? 'slot'}:${payload?.startedAt ?? payload?.endedAt ?? index}`);
+  }
+  trackBattleHero(index: number, hero: any): string {
+    return hero ? `hero:${hero?.uniqueId ?? hero?.id ?? hero?.name ?? index}` : `empty:${index}`;
   }
   battleHeroes(battle: TelemetryEvent, slot: number): any[] {
     const heroes = (battle as any)?.payload?.heroes;
@@ -1758,7 +1814,12 @@ class AppComponent implements OnInit, OnDestroy {
     const nextIndex = this.selectedTimelineIndex() + offset;
     if (nextIndex >= 0 && nextIndex < entries.length) this.selectTimelineEntry(entries[nextIndex].id);
   }
-  clearTimeline() { this.hideTooltips(); this.timelineEntries.set([]); this.selectedTimelineId.set(null); }
+  clearTimeline(force = false) {
+    if (this.historicalBattleContext() && !force) return;
+    this.hideTooltips();
+    this.timelineEntries.set([]);
+    this.selectedTimelineId.set(null);
+  }
   trackEffect(index: number, effect: any): string { return String(effect?._uiKey ?? `${effect?.id ?? 'unknown'}:${effect?.sourceHeroId ?? effect?.sourceName ?? 'unknown'}:${index}`); }
   effectKey(effect: any): string { return String(effect?._uiKey ?? `${effect?.id ?? 'unknown'}:${effect?.sourceHeroId ?? effect?.sourceName ?? 'unknown'}`); }
   effectTitle(effect: any): string {
@@ -1890,12 +1951,14 @@ class AppComponent implements OnInit, OnDestroy {
     return [...heroes].reverse();
   }
   async refreshHeroes(addToTimeline = false) {
+    if (addToTimeline && this.historicalBattleContext()) return;
     if (addToTimeline) { await this.captureTimelineSnapshot(false, this.recordingSession); return; }
     this.refreshing.set(true);
     try { await fetch('/api/snapshot', { method: 'POST' }); }
     finally { window.setTimeout(() => this.refreshing.set(false), 700); }
   }
   toggleRecording() {
+    if (this.historicalBattleContext()) return;
     if (this.recording()) { this.stopRecording(); return; }
     const selected = this.selectedHero();
     if (!selected) return;
@@ -1981,16 +2044,105 @@ class AppComponent implements OnInit, OnDestroy {
     }
   }
   private latestSlotSnapshotTimestamp(state: TelemetryState): string | null {
-    return state.snapshotUpdatedAt ?? null;
+    return state.slotsUpdatedAt ?? state.snapshotUpdatedAt ?? null;
   }
   private latestBattleMarker(state: TelemetryState, slot: number): string | null {
     const battle = state.battles.find(entry => Number((entry as any).payload?.battleIndex) === slot);
     return battle?.timestamp ?? null;
   }
   battleResultClass(result: unknown) { return String(result).toLowerCase().includes('win') ? 'bg-emerald-950 text-emerald-300' : 'bg-rose-950 text-rose-300'; }
-  openHero(hero: any) { this.stopRecording(); this.clearTimeline(); this.currentHeroDataView.set('stats'); this.selectedHero.set(hero); this.selectedHeroTab.set('stats'); }
+  openHero(hero: any) {
+    this.historicalTimelineRequest++;
+    this.historicalTimelineLoading.set(false);
+    this.historicalBattleContext.set(null);
+    this.stopRecording();
+    this.clearTimeline(true);
+    this.currentHeroDataView.set('stats');
+    this.selectedHero.set(hero);
+    this.selectedHeroTab.set('stats');
+  }
+  async openHistoricalHero(event: Event, battle: TelemetryEvent, hero: any) {
+    event.preventDefault();
+    event.stopPropagation();
+    const payload = (battle as any)?.payload;
+    const battleId = String(payload?.battleId || '');
+    const heroUniqueId = Number(hero?.uniqueId);
+    if (!payload?.timelineAvailable || !battleId || !Number.isInteger(heroUniqueId)) return;
+    const request = ++this.historicalTimelineRequest;
+    this.stopRecording();
+    this.historicalBattleContext.set({
+      battleId,
+      title: payload?.englishPlaceTitle || payload?.placeTitle || this.placeTitleFallback(payload),
+      durationSeconds: payload?.durationSeconds ?? '?'
+    });
+    this.timelineEntries.set([]);
+    this.selectedTimelineId.set(null);
+    this.currentHeroDataView.set('stats');
+    this.selectedHero.set(hero);
+    this.selectedHeroTab.set('stats');
+    this.historicalTimelineLoading.set(true);
+    try {
+      const response = await fetch(`/api/battle-timelines/${encodeURIComponent(battleId)}/heroes/${heroUniqueId}`);
+      if (!response.ok) throw new Error('Historic timeline is unavailable.');
+      const timeline = await response.json();
+      if (request !== this.historicalTimelineRequest || !this.historicalBattleContext()) return;
+      const historicalHero = timeline?.heroData ?? hero;
+      this.selectedHero.set(historicalHero);
+      const entries = this.hydrateHistoricalTimeline(historicalHero, timeline);
+      this.timelineEntries.set(entries);
+      this.selectedTimelineId.set(entries[0]?.id ?? null);
+    } catch {
+      if (request === this.historicalTimelineRequest) {
+        this.timelineEntries.set([]);
+        this.selectedTimelineId.set(null);
+      }
+    } finally {
+      if (request === this.historicalTimelineRequest) this.historicalTimelineLoading.set(false);
+    }
+  }
+  private hydrateHistoricalTimeline(hero: any, timeline: any): CombatTimelineEntry[] {
+    const statDefinitions = new Map<string, any>();
+    for (const definition of [...(Array.isArray(hero?.stats) ? hero.stats : []), ...(Array.isArray(hero?.combatStats) ? hero.combatStats : [])])
+      statDefinitions.set(String(definition?.id ?? definition?.key), definition);
+    const effectDefinitions = Array.isArray(timeline?.hero?.effectDefinitions) ? timeline.hero.effectDefinitions : [];
+    const damageDefinitions = Array.isArray(timeline?.hero?.damageDefinitions) ? timeline.hero.damageDefinitions : [];
+    const startedAt = Date.parse(timeline?.startedAt || '') || Date.now();
+    return (Array.isArray(timeline?.hero?.snapshots) ? timeline.hero.snapshots : []).map((snapshot: any, index: number) => {
+      const elapsedSeconds = Number(snapshot?.elapsedSeconds) || 0;
+      const stats = (Array.isArray(snapshot?.stats) ? snapshot.stats : []).map((compact: any) => {
+        const id = Array.isArray(compact) ? compact[0] : compact?.id;
+        const value = Array.isArray(compact) ? compact[1] : compact?.value;
+        const definition = statDefinitions.get(String(id)) || { id, key: `Stat ${id}`, englishName: `Stat ${id}` };
+        const { displayValue: _displayValue, specialDescription: _specialDescription, explanation: _explanation, ...stableDefinition } = definition;
+        return { ...stableDefinition, id, value };
+      });
+      const effects = (Array.isArray(snapshot?.effects) ? snapshot.effects : []).map((compact: any) => ({
+        ...(effectDefinitions[Number(compact?.[0])] || {}),
+        runtimeId: compact?.[1], stacks: compact?.[2], level: compact?.[3], duration: compact?.[4], elapsedDuration: compact?.[5]
+      }));
+      const compactDamage = snapshot?.damageDone;
+      const damageDone = compactDamage ? {
+        ...compactDamage,
+        entries: (Array.isArray(compactDamage?.entries) ? compactDamage.entries : []).map((compact: any) => ({
+          ...(damageDefinitions[Number(compact?.[0])] || {}),
+          damage: compact?.[1], dps: compact?.[2], castCount: compact?.[3], hitCount: compact?.[4],
+          criticalCount: compact?.[5], missCount: compact?.[6], share: compact?.[7]
+        }))
+      } : null;
+      const capturedAt = startedAt + Math.round(elapsedSeconds * 1000);
+      return { id: capturedAt + index, capturedAt, stats, effects, damageDone };
+    });
+  }
   selectHeroTab(tab: 'talents' | 'stats') { this.hideTooltips(); this.selectedHeroTab.set(tab); }
-  closeHero() { this.stopRecording(); this.selectedHero.set(null); this.hideTooltips(); }
+  closeHero() {
+    this.historicalTimelineRequest++;
+    this.historicalTimelineLoading.set(false);
+    this.historicalBattleContext.set(null);
+    this.stopRecording();
+    this.clearTimeline(true);
+    this.selectedHero.set(null);
+    this.hideTooltips();
+  }
   async resetSlot(slot: number) {
     const response = await fetch('/api/battles/' + slot, { method: 'DELETE' });
     if (!response.ok) throw new Error('Could not reset battle history');
