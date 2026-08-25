@@ -162,7 +162,7 @@ Harmony postfixes are installed on:
 - `AdvFieldData.BattleEnd` — the single completed-battle emission point after the adventure field finalizes rewards and global modifiers.
 - Do not capture loot from `DropSys.GetDropItemList` or `AdvFieldData.AddDropItem`; both occur before the late Gold/Blood reward adjustment.
 - `TableData.init` — one-time catalogs.
-- `Root.Update` — checks for an on-demand snapshot marker four times per second.
+- `Root.Update` — checks general on-demand snapshot markers four times per second and the lightweight selected-hero combat marker every 50 ms.
 
 Important paths and fields:
 
@@ -176,7 +176,7 @@ Important paths and fields:
 
 ## Telemetry and HTTP API
 
-Current events include `heartbeat`, `battle.started`, `battle.ended`, `snapshot.slots`, `snapshot.heroes`, `snapshot.resources`, `snapshot.inventory`, and catalogs for talents, skills, abilities, materials, runes, tools, curios, and equipment. The plugin sends a lightweight heartbeat every two seconds. The backend does not persist heartbeats or add them to the event list; it broadcasts `gameRunning` only when presence changes and marks the game stopped after five seconds without a heartbeat.
+Current events include `heartbeat`, `battle.started`, `battle.ended`, `snapshot.slots`, `snapshot.heroes`, `snapshot.combat`, `snapshot.resources`, `snapshot.inventory`, and catalogs for talents, skills, abilities, materials, runes, tools, curios, and equipment. The plugin sends a lightweight heartbeat every two seconds. The backend does not persist heartbeats or add them to the event list; it broadcasts `gameRunning` only when presence changes and marks the game stopped after five seconds without a heartbeat.
 
 - `GET /api/health` — health and last update.
 - `GET /api/state` — live state excluding large catalogs.
@@ -184,10 +184,11 @@ Current events include `heartbeat`, `battle.started`, `battle.ended`, `snapshot.
 - `GET /api/stream` — server-sent live state.
 - `POST /api/events` — ingestion, limited to 1 MB.
 - `POST /api/snapshot` — creates `<game>\BepInEx\PathOfIdleStats\snapshot.request`.
+- `POST /api/combat-snapshot` — correlated request/response capture for one hero. It creates `combat-snapshot.request`, waits for the matching `snapshot.combat`, and returns the payload directly without broadcasting or replacing dashboard state.
 - `DELETE /api/battles/0`, `/1`, or `/2` — clears one slot's history.
 - `GET /assets/icons/<sha256>.png` — local extracted icons.
 
-`Root.Update` consumes and deletes the snapshot marker, then emits `snapshot.slots` and `snapshot.heroes`. This avoids waiting for battle completion. A marker may be queued while the game is closed and consumed after the game starts and a save is entered.
+`Root.Update` consumes and deletes the general snapshot marker, then emits `snapshot.slots` and `snapshot.heroes`. Timeline capture uses a separate hero-specific path: the request carries `requestId` and `heroUniqueId`, the plugin extracts only live stats, effects, health/death state, and damage-meter data for that hero, and the backend resolves only the matching browser request. The telemetry writer drains immediately when an event is enqueued rather than polling every 250 ms. A general marker may be queued while the game is closed and consumed after the game starts and a save is entered.
 
 Live state is held in memory, while the retained newest 50 completed battles per slot and scanner configuration are persisted in `data/path-of-idle-stats.sqlite`. Battle history is restored at server startup, updated synchronously on every `battle.ended`, and updated by the per-slot reset endpoint. Completed battles are never appended to `data/events.jsonl`; that file is limited to smaller non-snapshot diagnostic events. The first SQLite-enabled startup migrates the newest legacy battles, commits them, and permanently deletes the old raw event log. Catalogs overwrite individual files in `data/catalogs/`.
 
@@ -237,7 +238,8 @@ The dashboard intentionally contains only the header/status controls, three batt
 
 - The hero dialog is a tab group with **Talents** first and **Stats** second.
 - Stats contains two side-by-side lists: `HeroData.attrData` for current/base values and the matching `CombatData.attrData` for live combat values.
-- The **Refresh stats now** button uses the same on-demand snapshot marker and updates the open hero without waiting for battle completion.
+- The **Refresh** button uses the correlated hero-specific combat endpoint, always adds the returned capture to the timeline, and updates the open hero without rebuilding all slots/heroes.
+- Recording uses the same serialized capture path at a one-second cadence; it never overlaps requests and still stops on hero death, manual stop, or the selected slot's battle transition.
 - Match each hero to combat state through `AdvFieldData.advBattleData.comPlayerList` and the combat object's `heroData` pointer.
 - Enumerate every nonzero `EAttrType`, including normally hidden/internal modifiers. Use `TAttr` for English names/descriptions and retain the enum key plus numeric ID for transparency.
 - Use `AttrInfoData.Create`, `SetOwnHeroData`, `GetDesc`, `GetSpecialDesc`, and `GetExplain` for the game's resolved derived explanations. Pass the hero's level for both base and combat attributes.

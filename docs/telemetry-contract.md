@@ -7,10 +7,10 @@ If the server is unavailable, events are appended to a local JSONL file under
 Planned event types:
 
 - `snapshot.heroes`: heroes, levels, classes, calculated stats, equipped items.
+- `snapshot.combat`: correlated, selected-hero live stats, effects, health state, and damage meter.
 - `snapshot.inventory`: item identity, rarity, affixes, sockets/runes, quantities.
 - `battle.started`: mode/stage and participating heroes.
 - `battle.ended`: duration, result, enemy count, enemies, rewards, and loot.
 - `heartbeat`: plugin/game version and connection health.
 
 Exact game fields will be mapped after the first IL2CPP interop/discovery launch.
-

@@ -810,7 +810,6 @@ class AppComponent implements OnInit, OnDestroy {
   private recordingSession = 0;
   private recordingBattleSlot: number | null = null;
   private recordingBattleMarker: string | null = null;
-  private pendingSnapshot?: { previousTimestamp: string | null; resolve: (state: TelemetryState | null) => void; timeout: number };
   private tooltipFrame?: number;
   private tooltipValidationFrame?: number;
   private activeTooltipId?: string;
@@ -887,12 +886,6 @@ class AppComponent implements OnInit, OnDestroy {
       this.handleInventoryItemAdded(next.inventoryItemAdded || null);
       if (next.gameRunning) void this.refreshTalentCatalogIfNeeded();
       this.scheduleTooltipAnchorValidation();
-      if (this.pendingSnapshot && this.latestSlotSnapshotTimestamp(next) !== this.pendingSnapshot.previousTimestamp) {
-        window.clearTimeout(this.pendingSnapshot.timeout);
-        const resolve = this.pendingSnapshot.resolve;
-        this.pendingSnapshot = undefined;
-        resolve(next);
-      }
       if (this.recording() && this.recordingBattleSlot != null) {
         const latestBattle = this.latestBattleMarker(next, this.recordingBattleSlot);
         if (latestBattle != null && latestBattle !== this.recordingBattleMarker) this.stopRecording();
@@ -911,7 +904,6 @@ class AppComponent implements OnInit, OnDestroy {
     this.destroyed = true;
     this.stream?.close();
     this.stopRecording();
-    if (this.pendingSnapshot) { window.clearTimeout(this.pendingSnapshot.timeout); this.pendingSnapshot.resolve(null); this.pendingSnapshot = undefined; }
     document.removeEventListener('pointermove', this.nativePointerMove);
     document.removeEventListener('error', this.nativeImageError, true);
     document.removeEventListener('load', this.nativeImageLoad, true);
@@ -1908,7 +1900,11 @@ class AppComponent implements OnInit, OnDestroy {
     const selected = this.selectedHero();
     if (!selected) return;
     if (this.isHeroDead(selected)) { this.stopRecording(); return; }
-    const slot = this.state().slots.find(entry => entry.heroes.some(hero => this.heroIdentity(hero) === this.heroIdentity(selected)))?.battleIndex;
+    const selectedIdentity = this.heroIdentity(selected);
+    const liveSlot = this.state().slots.find(entry => entry.heroes.some(hero => this.heroIdentity(hero) === selectedIdentity))?.battleIndex;
+    const retainedSlot = this.state().battles.find(entry => Array.isArray((entry as any)?.payload?.heroes)
+      && (entry as any).payload.heroes.some((hero: any) => this.heroIdentity(hero) === selectedIdentity));
+    const slot = liveSlot ?? (retainedSlot as any)?.payload?.battleIndex;
     if (slot == null) return;
     this.recordingSession++;
     const session = this.recordingSession;
@@ -1938,7 +1934,7 @@ class AppComponent implements OnInit, OnDestroy {
           this.recordingTimer = undefined;
           this.recordingDelayResolve = undefined;
           resolve();
-        }, Math.max(0, 2000 - (Date.now() - startedAt)));
+        }, Math.max(0, 1000 - (Date.now() - startedAt)));
       });
     }
   }
@@ -1953,20 +1949,20 @@ class AppComponent implements OnInit, OnDestroy {
     if (!selected) return;
     this.refreshing.set(true);
     try {
-      const previousSnapshot = this.latestSlotSnapshotTimestamp(this.state());
-      const snapshotState = new Promise<TelemetryState | null>(resolve => {
-        const timeout = window.setTimeout(() => {
-          if (this.pendingSnapshot?.resolve === resolve) this.pendingSnapshot = undefined;
-          resolve(null);
-        }, 10000);
-        this.pendingSnapshot = { previousTimestamp: previousSnapshot, resolve, timeout };
+      const heroUniqueId = Number(selected?.uniqueId);
+      if (!Number.isInteger(heroUniqueId) || heroUniqueId <= 0) return;
+      const response = await fetch('/api/combat-snapshot', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ heroUniqueId })
       });
-      await fetch('/api/snapshot', { method: 'POST' });
-      const live = await snapshotState;
+      if (!response.ok) throw new Error((await response.json().catch(() => null))?.error || 'Combat snapshot failed.');
+      const result = await response.json();
       if (recordingCapture && (!this.recording() || session !== this.recordingSession)) return;
-      const hero = live?.slots.flatMap(slot => slot.heroes as any[]).find(candidate => this.heroIdentity(candidate) === this.heroIdentity(selected));
+      const hero = result?.hero;
       if (hero && this.isHeroDead(hero)) { if (recordingCapture) this.stopRecording(); return; }
       if (!hero?.inCombat || !Array.isArray(hero?.combatStats)) return;
+      this.selectedHero.update(current => current && this.heroIdentity(current) === this.heroIdentity(hero) ? { ...current, ...hero } : current);
       const entry: CombatTimelineEntry = {
         id: Date.now(),
         capturedAt: Date.now(),

@@ -23,7 +23,7 @@ public sealed class Plugin : BasePlugin
 {
     public const string PluginGuid = "local.pathofidle.stats";
     public const string PluginName = "Path of Idle Stats";
-    public const string PluginVersion = "0.7.9";
+    public const string PluginVersion = "0.8.0";
 
     private static Plugin? Instance;
     private static readonly object StateLock = new();
@@ -33,6 +33,7 @@ public sealed class Plugin : BasePlugin
     private static readonly Queue<string> PendingIcons = new();
     private static readonly HashSet<string> KnownIcons = new(StringComparer.OrdinalIgnoreCase);
     private static bool catalogSent;
+    private static float nextCombatSnapshotRequestCheck;
     private static float nextSnapshotRequestCheck;
     private static float nextHeartbeat;
     private static float nextIconExport;
@@ -90,6 +91,11 @@ public sealed class Plugin : BasePlugin
             ExportPendingIcons(exportCount);
             ReportIconProgress();
         }
+        if (now >= nextCombatSnapshotRequestCheck)
+        {
+            nextCombatSnapshotRequestCheck = now + 0.05f;
+            TryConsumeCombatSnapshotRequest();
+        }
         if (now < nextSnapshotRequestCheck) return;
         nextSnapshotRequestCheck = now + 0.25f;
         var telemetryDirectory = Path.Combine(Paths.BepInExRootPath, "PathOfIdleStats");
@@ -146,6 +152,27 @@ public sealed class Plugin : BasePlugin
             }
         }
     });
+
+    private static void TryConsumeCombatSnapshotRequest()
+    {
+        var path = Path.Combine(Paths.BepInExRootPath, "PathOfIdleStats", "combat-snapshot.request");
+        if (!File.Exists(path)) return;
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(path));
+            var root = document.RootElement;
+            var requestId = root.GetProperty("requestId").GetString();
+            var heroUniqueId = root.GetProperty("heroUniqueId").GetInt32();
+            File.Delete(path);
+            if (string.IsNullOrWhiteSpace(requestId) || heroUniqueId <= 0) return;
+            EmitHeroCombatSnapshot(requestId, heroUniqueId);
+        }
+        catch (Exception error)
+        {
+            try { File.Delete(path); } catch { }
+            Instance?.Log.LogWarning($"Combat snapshot request failed safely: {error.Message}");
+        }
+    }
 
     private static bool TryEnableAllBattleSlotsFromUi(out string status)
     {
@@ -376,6 +403,48 @@ public sealed class Plugin : BasePlugin
         Instance?.writer?.Enqueue("snapshot.slots", new { slots });
         Instance?.writer?.Enqueue("snapshot.heroes", new { heroes = allHeroes });
         Instance?.writer?.Enqueue("snapshot.resources", new { resources = DescribePrimaryResources(), sanctum = DescribeSanctum() });
+    }
+
+    private static void EmitHeroCombatSnapshot(string requestId, int heroUniqueId)
+    {
+        var dataMgr = ReadStatic("Game", "dataMgr");
+        var advData = Read(Read(dataMgr, "nowSeasonData"), "advData");
+        foreach (var field in ReadList(Read(advData, "advFieldList")))
+        {
+            var hero = ReadList(Read(field, "heroFieldList"))
+                .Select(heroField => Read(heroField, "heroData"))
+                .FirstOrDefault(candidate => ReadNullableInt(Read(candidate, "saveHeroData"), "uniqueId") == heroUniqueId);
+            if (hero is null) continue;
+
+            var saveField = Read(field, "saveAdvFieldData");
+            var battleIndex = ReadNullableInt(saveField, "index") ?? 0;
+            var tallyData = Read(field, "advTallyData");
+            var combat = ReadList(Read(Read(field, "advBattleData"), "comPlayerList"))
+                .FirstOrDefault(candidate => NativePointer(Read(candidate, "heroData") ?? candidate) == NativePointer(hero));
+            Instance?.writer?.Enqueue("snapshot.combat", new
+            {
+                requestId,
+                hero = DescribeHeroCombatSnapshot(hero, combat, tallyData, GetObservedBattleTime(battleIndex), GetBattleCapture(battleIndex))
+            });
+            return;
+        }
+        Instance?.writer?.Enqueue("snapshot.combat", new { requestId, hero = (object?)null, error = "Hero is not assigned to a battle slot." });
+    }
+
+    private static Dictionary<string, object?> DescribeHeroCombatSnapshot(object hero, object? combat, object? tallyData, double? observedBattleTime, BattleCapture? battleCapture)
+    {
+        var save = Read(hero, "saveHeroData");
+        var currentHealth = ReadNullableDouble(Read(combat, "comResData"), "nowHp");
+        return new()
+        {
+            ["uniqueId"] = ReadNullableInt(save, "uniqueId"),
+            ["combatStats"] = DescribeStats(Read(combat, "attrData"), hero, ReadNullableInt(save, "level")),
+            ["combatEffects"] = TryDescribeCombatEffects(combat),
+            ["damageDone"] = TryDescribeDamageDone(hero, tallyData, observedBattleTime, battleCapture),
+            ["inCombat"] = combat is not null,
+            ["currentHealth"] = currentHealth,
+            ["isDead"] = combat is not null && currentHealth is <= 0
+        };
     }
 
     private static void EmitCodexSnapshot()
@@ -2061,7 +2130,6 @@ internal sealed class TelemetryWriter : IDisposable
     private readonly HttpClient client = new() { Timeout = TimeSpan.FromSeconds(1) };
     private readonly string fallbackPath;
     private readonly BepInEx.Logging.ManualLogSource log;
-    private readonly Timer timer;
     private int draining;
 
     public TelemetryWriter(string directory, BepInEx.Logging.ManualLogSource log)
@@ -2069,9 +2137,12 @@ internal sealed class TelemetryWriter : IDisposable
         Directory.CreateDirectory(directory);
         fallbackPath = Path.Combine(directory, "events.jsonl");
         this.log = log;
-        timer = new Timer(_ => _ = DrainAsync(), null, TimeSpan.Zero, TimeSpan.FromMilliseconds(250));
     }
-    public void Enqueue(string type, object payload) => queue.Enqueue(JsonSerializer.Serialize(new { type, timestamp = DateTimeOffset.UtcNow, payload }, JsonOptions));
+    public void Enqueue(string type, object payload)
+    {
+        queue.Enqueue(JsonSerializer.Serialize(new { type, timestamp = DateTimeOffset.UtcNow, payload }, JsonOptions));
+        _ = DrainAsync();
+    }
     private async Task DrainAsync()
     {
         if (Interlocked.Exchange(ref draining, 1) != 0) return;
@@ -2086,7 +2157,11 @@ internal sealed class TelemetryWriter : IDisposable
             catch { await File.AppendAllTextAsync(fallbackPath, json + Environment.NewLine, new UTF8Encoding(false)).ConfigureAwait(false); }
         }
         catch (Exception error) { log.LogWarning($"Telemetry writer failed safely: {error.Message}"); }
-        finally { Volatile.Write(ref draining, 0); }
+        finally
+        {
+            Volatile.Write(ref draining, 0);
+            if (!queue.IsEmpty) _ = DrainAsync();
+        }
     }
-    public void Dispose() { timer.Dispose(); client.Dispose(); }
+    public void Dispose() { client.Dispose(); }
 }

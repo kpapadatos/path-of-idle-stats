@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { appendFile, mkdir, open, readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import { dirname, extname, join, normalize } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -18,6 +19,7 @@ const iconRoots = [join(telemetryDirectory, 'icons'), join(root, 'data', 'icons'
 const requestedPort = Number(process.env.PATH_OF_IDLE_STATS_PORT ?? 43127);
 const port = Number.isInteger(requestedPort) && requestedPort >= 1 && requestedPort <= 65535 ? requestedPort : 43127;
 const snapshotRequest = join(telemetryDirectory, 'snapshot.request');
+const combatSnapshotRequest = join(telemetryDirectory, 'combat-snapshot.request');
 const catalogRequest = join(telemetryDirectory, 'catalog.request');
 const codexRequest = join(telemetryDirectory, 'codex.request');
 const inventoryRequest = join(telemetryDirectory, 'inventory.request');
@@ -26,6 +28,7 @@ const clients = new Set();
 const state = { connected: false, gameRunning: false, updatedAt: null, snapshotUpdatedAt: null, inventoryUpdatedAt: null, inventoryItemAdded: null, iconProgress: null, heroes: [], slots: [], resources: [], sanctum: null, inventory: [], battles: [], events: [], catalogs: {} };
 let codexSnapshot = { updatedAt: null, items: [], affixPools: [], rarities: [] };
 let lastGameHeartbeat = 0;
+const pendingCombatSnapshots = new Map();
 await mkdir(dataDirectory, { recursive: true });
 try {
   const savedIconProgress = JSON.parse(await readFile(iconProgressFile, 'utf8'));
@@ -253,6 +256,34 @@ function publicState(includeInventory = true) {
   return streamable;
 }
 
+async function requestCombatSnapshot(heroUniqueId) {
+  if (pendingCombatSnapshots.size > 0) throw Object.assign(new Error('A combat snapshot is already in progress.'), { statusCode: 409 });
+  const requestId = randomUUID();
+  await mkdir(dirname(combatSnapshotRequest), { recursive: true });
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      pendingCombatSnapshots.delete(requestId);
+      reject(Object.assign(new Error('The game did not return the combat snapshot in time.'), { statusCode: 504 }));
+    }, 5000);
+    pendingCombatSnapshots.set(requestId, { resolve, timeout });
+    writeFile(combatSnapshotRequest, JSON.stringify({ requestId, heroUniqueId }), 'utf8').catch(error => {
+      clearTimeout(timeout);
+      pendingCombatSnapshots.delete(requestId);
+      reject(error);
+    });
+  });
+}
+
+function completeCombatSnapshot(event) {
+  const requestId = event?.payload?.requestId;
+  const pending = typeof requestId === 'string' ? pendingCombatSnapshots.get(requestId) : null;
+  if (!pending) return false;
+  clearTimeout(pending.timeout);
+  pendingCombatSnapshots.delete(requestId);
+  pending.resolve(event.payload);
+  return true;
+}
+
 function broadcastState() {
   const message = `data: ${JSON.stringify(publicState(false))}\n\n`;
   for (const client of clients) client.write(message);
@@ -313,6 +344,13 @@ const server = createServer(async (request, response) => {
       await writeFile(snapshotRequest, new Date().toISOString(), 'utf8');
       return json(response, 202, { requested: true });
     }
+    if (request.method === 'POST' && url.pathname === '/api/combat-snapshot') {
+      const body = JSON.parse(await readBody(request));
+      const heroUniqueId = Number(body?.heroUniqueId);
+      if (!Number.isInteger(heroUniqueId) || heroUniqueId <= 0) return json(response, 400, { error: 'A valid heroUniqueId is required.' });
+      try { return json(response, 200, await requestCombatSnapshot(heroUniqueId)); }
+      catch (error) { return json(response, error?.statusCode ?? 500, { error: error?.message ?? 'Combat snapshot failed.' }); }
+    }
     if (request.method === 'DELETE' && /^\/api\/battles\/[0-2]$/.test(url.pathname)) {
       const slot = Number(url.pathname.slice(-1));
       state.battles = persistBattleHistory(state.battles.filter(battle => battleSlot(battle) !== slot));
@@ -330,6 +368,10 @@ const server = createServer(async (request, response) => {
       const event = JSON.parse(await readBody(request));
       if (!event || typeof event.type !== 'string') return json(response, 400, { error: 'type is required' });
       event.timestamp ??= new Date().toISOString();
+      if (event.type === 'snapshot.combat') {
+        completeCombatSnapshot(event);
+        return json(response, 202, { accepted: true });
+      }
       if (event.type.startsWith('catalog.')) {
         const catalogDirectory = join(dataDirectory, 'catalogs');
         await mkdir(catalogDirectory, { recursive: true });
