@@ -11,10 +11,14 @@ const scannerDatabasePath = join(dataDirectory, 'path-of-idle-stats.sqlite');
 const scannerBackupDirectory = join(dataDirectory, 'scanner-state-backups');
 const webRoot = join(root, 'dist', 'dashboard', 'browser');
 const iconRoot = join(root, 'data', 'icons');
-const snapshotRequest = 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\PathOfIdle\\BepInEx\\PathOfIdleStats\\snapshot.request';
-const catalogRequest = 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\PathOfIdle\\BepInEx\\PathOfIdleStats\\catalog.request';
-const codexRequest = 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\PathOfIdle\\BepInEx\\PathOfIdleStats\\codex.request';
-const inventoryRequest = 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\PathOfIdle\\BepInEx\\PathOfIdleStats\\inventory.request';
+const gameDirectory = process.env.PATH_OF_IDLE_GAME_DIR?.trim() || 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\PathOfIdle';
+const telemetryDirectory = join(gameDirectory, 'BepInEx', 'PathOfIdleStats');
+const requestedPort = Number(process.env.PATH_OF_IDLE_STATS_PORT ?? 43127);
+const port = Number.isInteger(requestedPort) && requestedPort >= 1 && requestedPort <= 65535 ? requestedPort : 43127;
+const snapshotRequest = join(telemetryDirectory, 'snapshot.request');
+const catalogRequest = join(telemetryDirectory, 'catalog.request');
+const codexRequest = join(telemetryDirectory, 'codex.request');
+const inventoryRequest = join(telemetryDirectory, 'inventory.request');
 const clients = new Set();
 const state = { connected: false, gameRunning: false, updatedAt: null, snapshotUpdatedAt: null, inventoryUpdatedAt: null, inventoryItemAdded: null, heroes: [], slots: [], resources: [], sanctum: null, inventory: [], battles: [], events: [], catalogs: {} };
 let codexSnapshot = { updatedAt: null, items: [], affixPools: [], rarities: [] };
@@ -138,7 +142,7 @@ const contentTypes = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascr
 const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url, 'http://127.0.0.1');
-    if (request.method === 'GET' && url.pathname === '/api/health') return json(response, 200, { ok: true, updatedAt: state.updatedAt });
+    if (request.method === 'GET' && url.pathname === '/api/health') return json(response, 200, { ok: true, app: 'path-of-idle-stats', updatedAt: state.updatedAt });
     if (request.method === 'GET' && url.pathname === '/api/state') return json(response, 200, publicState());
     if (request.method === 'GET' && url.pathname === '/api/catalogs') return json(response, 200, state.catalogs);
     if (request.method === 'GET' && url.pathname === '/api/codex') return json(response, 200, codexSnapshot);
@@ -228,8 +232,8 @@ const server = createServer(async (request, response) => {
   }
 });
 
-server.listen(43127, '127.0.0.1', () => {
-  console.log('Path of Idle Stats: http://127.0.0.1:43127');
+server.listen(port, '127.0.0.1', () => {
+  console.log(`Path of Idle Stats: http://127.0.0.1:${port}`);
   console.log(`Event log: ${eventLog}`);
 });
 

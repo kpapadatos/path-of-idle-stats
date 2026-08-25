@@ -18,7 +18,7 @@ Telemetry extraction is read-only with respect to game state. The optional guard
 - `scripts/update-plugin.ps1` only replaces the manifest-recorded plugin and backs up the previous DLL by SHA-256.
 - `scripts/uninstall.ps1` removes only manifest-recorded files and restores backed-up collisions.
 - The plugin and server communicate only over `http://127.0.0.1:43127`.
-- Never commit `data/`, `work/`, `install-manifest.json`, BepInEx binaries, compiled DLLs, logs, or extracted game assets.
+- Never commit `data/`, `work/`, `install-manifest.json`, logs, or extracted game assets. The pinned player runtime under `vendor/`, compiled plugin under `release/`, and production dashboard under `dist/dashboard/browser/` are intentionally committed for one-step installation.
 
 ## Repository layout
 
@@ -28,6 +28,8 @@ Telemetry extraction is read-only with respect to game state. The optional guard
 - `web/src/main.ts` — standalone Angular dashboard and UI.
 - `scripts/build-plugin.ps1` — Roslyn compilation against BepInEx and game interop.
 - `scripts/install.ps1` — guarded first installation.
+- `scripts/find-game.ps1` — detects Steam and its custom libraries, then verifies app `4243990` and the game layout.
+- `scripts/start.ps1` / `start.bat` — idempotent install/update, bundled server startup, readiness check, and browser opening.
 - `scripts/update-plugin.ps1` — guarded plugin-only replacement.
 - `scripts/configure-bepinex.ps1` — disables only BepInEx console output while preserving disk logs.
 - `scripts/restart-game-and-update.ps1` — normal-close/update/reopen workflow with verified window placement, Continue, and three-slot Auto UI clicks.
@@ -44,7 +46,8 @@ Telemetry extraction is read-only with respect to game state. The optional guard
 - Archive SHA-256: `9753B825578A3C3A31CC10067CD45A44A7BF56D3C34C4679E24D6ADFD0FBA8EA`.
 - Plugin target: .NET 6.
 - The custom compiler script discovers Roslyn from the newest installed .NET SDK.
-- Node dependencies are locked by `pnpm-lock.yaml`.
+- Node build dependencies are locked by `pnpm-lock.yaml`. They are not needed at runtime: the server uses Node built-ins and the Angular production build is committed.
+- Bundled Node runtime: Windows x64 `22.22.2`; archive SHA-256 `7C93E9D92BF68C07182B471AA187E35EE6CD08EF0F24AB060DFFF605FCC1C57C`.
 
 Use only the official BepInEx build server or official BepInEx GitHub organization. Verify the archive hash before extraction; never use an unrelated repack.
 
@@ -52,7 +55,7 @@ Use only the official BepInEx build server or official BepInEx GitHub organizati
 
 ### 1. Prerequisites and checkout
 
-Install Git, Node.js with Corepack/pnpm, a .NET SDK with Roslyn, Python 3 if regenerating icons, and Path of Idle through Steam.
+Players need only Windows, Steam, and Path of Idle. Contributors need Git, Node.js with Corepack/pnpm, a .NET SDK with Roslyn, and Python 3 if regenerating icons.
 
 ```powershell
 git clone https://github.com/kpapadatos/path-of-idle-stats.git C:\r\path-of-idle-stats
@@ -61,7 +64,7 @@ corepack enable
 pnpm install --frozen-lockfile
 ```
 
-### 2. Stage BepInEx
+### 2. Stage BepInEx (maintainer/source builds only)
 
 Download the pinned official IL2CPP x64 archive and extract it so this file exists:
 
@@ -92,9 +95,9 @@ Required references include:
 
 Earlier broad Unity assembly scans caused noisy `TypeLoadException` messages such as invalid `LightProbesQueryDisposeJob` formats. The current plugin patches named methods directly and avoids broad assembly scanning.
 
-### 4. Build and install the plugin
+### 4. Build and install the plugin (maintainer/source builds only)
 
-The compiler still assumes the default Steam game directory; adjust that path if the game is installed elsewhere.
+The compiler still assumes the default Steam game directory; adjust that path if the game is installed elsewhere. Player installation does not: `start.bat` discovers all configured Steam library folders.
 
 ```powershell
 .\scripts\build-plugin.ps1
@@ -255,15 +258,13 @@ Catalogs cover talents, skills, abilities, materials, runes, tools, curios, and 
 - No telemetry is intentionally sent off-machine.
 - Public GitHub repository: [https://github.com/kpapadatos/path-of-idle-stats](https://github.com/kpapadatos/path-of-idle-stats).
 
-## Portability limitations to fix next
+## Portability notes
 
-1. `build-plugin.ps1` hard-codes the Steam interop directory.
-2. `server.mjs` hard-codes the default Steam path for `snapshot.request`.
-3. `install.ps1` requires staged BepInEx and a prebuilt plugin, creating a bootstrap problem before first interop generation.
-4. There is no checked-in official BepInEx download/hash-verification helper.
-5. Icon extraction dependencies are not pinned in a requirements file.
-
-Recommended cleanup: add one ignored local config with a committed example; parameterize all paths; output builds under `plugin/bin`; add a pinned official-download helper; split BepInEx bootstrap from plugin installation; and pin Python dependencies.
+- Player startup is portable across Steam library drives: `scripts/find-game.ps1` discovers Steam from registry data, parses `libraryfolders.vdf`, validates app manifest `4243990`, and verifies the executable/data layout.
+- `start.bat` installs from checked-in `vendor/bepinex` and `release/PathOfIdleStats.dll`, starts `vendor/node/node.exe`, passes the discovered game directory to the server, waits for `/api/health`, and opens the browser.
+- The server uses `PATH_OF_IDLE_GAME_DIR` for request-file IPC instead of a hard-coded game location.
+- `node_modules` remains intentionally ignored because it is build-only and adds about 208 MB without helping players.
+- Maintainer-only `build-plugin.ps1` still assumes the default Steam interop directory; parameterizing that build path and pinning icon-extraction dependencies remain future cleanup.
 
 ## Troubleshooting
 
@@ -287,4 +288,4 @@ git status --short
 
 For plugin changes: close the game, build, update, verify DLL hashes, restart, enter the save, inspect the BepInEx log, request a snapshot, and confirm three slots plus hero/talent selection data.
 
-The public repository is [https://github.com/kpapadatos/path-of-idle-stats](https://github.com/kpapadatos/path-of-idle-stats); the default branch is `main`. Preserve reproducibility through pinned downloads, scripts, configuration examples, and extraction instructions—not by committing runtime or game-derived files.
+The public repository is [https://github.com/kpapadatos/path-of-idle-stats](https://github.com/kpapadatos/path-of-idle-stats); the default branch is `main`. Preserve reproducibility with pinned runtime versions, published archive hashes, bundled licenses, scripts, and verification checks. Never commit runtime telemetry or game-derived assets.

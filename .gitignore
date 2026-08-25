@@ -2,8 +2,7 @@
 node_modules/
 .pnpm-store/
 
-# Angular/build output and caches
-dist/
+# Angular caches; the production dashboard build is intentionally bundled.
 .angular/
 coverage/
 
