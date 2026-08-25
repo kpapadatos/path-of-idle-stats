@@ -23,7 +23,7 @@ public sealed class Plugin : BasePlugin
 {
     public const string PluginGuid = "local.pathofidle.stats";
     public const string PluginName = "Path of Idle Stats";
-    public const string PluginVersion = "0.7.6";
+    public const string PluginVersion = "0.7.7";
 
     private static Plugin? Instance;
     private static readonly object StateLock = new();
@@ -51,6 +51,8 @@ public sealed class Plugin : BasePlugin
         Patch("CombatData", "CreateEnemy", nameof(EnemyCreatedPostfix));
         Patch("ActionData", "OnCastSkill", nameof(ActionCastPostfix));
         PatchOverload("AdvTallyData", "AddData", 5, nameof(TallyDamageAddedPostfix));
+        Patch("AbilityCheckData", "CreateByBulletCrit", nameof(BulletCritPostfix));
+        Patch("AbilityCheckData", "CreateByBulletDodge", nameof(BulletDodgePostfix));
         Patch("AdvFieldData", "BattleEnd", nameof(BattleEndedPostfix));
         Patch("TableData", "init", nameof(TableReadyPostfix));
         Patch("Root", "Update", nameof(RootUpdatePostfix));
@@ -813,6 +815,35 @@ public sealed class Plugin : BasePlugin
         }
     });
 
+    private static void BulletCritPostfix(object[] __args) =>
+        CaptureBulletResolution(__args, isCritical: true);
+
+    private static void BulletDodgePostfix(object[] __args) =>
+        CaptureBulletResolution(__args, isCritical: false);
+
+    private static void CaptureBulletResolution(object[] args, bool isCritical) =>
+        SafeHook(isCritical ? "bullet-critical" : "bullet-dodge", () =>
+        {
+            if (args.Length == 0 || args[0] is null) return;
+            var bullet = args[0];
+            var emitter = Read(bullet, "ownEmitterData");
+            var combat = Read(emitter, "ownCombatData");
+            var hero = Read(combat, "heroData");
+            var skill = Read(emitter, "ownSkillData") ?? Read(Read(emitter, "ownActionData"), "ownSkillData");
+            var heroUniqueId = ReadNullableInt(Read(hero, "saveHeroData"), "uniqueId");
+            var talentId = ResolveTalentOriginId(hero, skill);
+            var battleIndex = ReadNullableInt(bullet, "fieldIndex")
+                ?? ReadNullableInt(emitter, "fieldIndex")
+                ?? ReadNullableInt(combat, "fieldIndex");
+            if (heroUniqueId is null || talentId is null || battleIndex is null) return;
+            lock (StateLock)
+            {
+                if (!Battles.TryGetValue(battleIndex.Value, out var capture)) return;
+                if (isCritical) capture.IncrementCritical(heroUniqueId.Value, "talent", talentId.Value);
+                else capture.IncrementMiss(heroUniqueId.Value, "talent", talentId.Value);
+            }
+        });
+
     private static void BattleEndedPostfix(object __instance, object[] __args) => SafeHook("battle-ended", () =>
     {
         var index = ReadNullableInt(Read(__instance, "saveAdvFieldData"), "index") ?? -1;
@@ -1003,6 +1034,12 @@ public sealed class Plugin : BasePlugin
                     : null,
                 ["hitCount"] = battleCapture is not null && heroUniqueId is not null && originId is not null
                     ? battleCapture.GetHitCount(heroUniqueId.Value, originType, originId.Value)
+                    : null,
+                ["criticalCount"] = battleCapture is not null && heroUniqueId is not null && originId is not null
+                    ? battleCapture.GetCriticalCount(heroUniqueId.Value, originType, originId.Value)
+                    : null,
+                ["missCount"] = battleCapture is not null && heroUniqueId is not null && originId is not null
+                    ? battleCapture.GetMissCount(heroUniqueId.Value, originType, originId.Value)
                     : null,
                 ["share"] = ReadNullableDouble(item, "per")
             });
@@ -1848,6 +1885,8 @@ public sealed class Plugin : BasePlugin
         public List<Dictionary<string, object?>> Loot { get; } = new();
         private Dictionary<string, int> CastCounts { get; } = new(StringComparer.OrdinalIgnoreCase);
         private Dictionary<string, int> HitCounts { get; } = new(StringComparer.OrdinalIgnoreCase);
+        private Dictionary<string, int> CriticalCounts { get; } = new(StringComparer.OrdinalIgnoreCase);
+        private Dictionary<string, int> MissCounts { get; } = new(StringComparer.OrdinalIgnoreCase);
         public void IncrementCast(int heroUniqueId, string originType, int originId)
         {
             var key = $"{heroUniqueId}:{originType}:{originId}";
@@ -1867,6 +1906,26 @@ public sealed class Plugin : BasePlugin
         {
             if (string.IsNullOrWhiteSpace(originType)) return null;
             return HitCounts.TryGetValue($"{heroUniqueId}:{originType}:{originId}", out var count) ? count : null;
+        }
+        public void IncrementCritical(int heroUniqueId, string originType, int originId)
+        {
+            var key = $"{heroUniqueId}:{originType}:{originId}";
+            CriticalCounts[key] = CriticalCounts.GetValueOrDefault(key) + 1;
+        }
+        public int? GetCriticalCount(int heroUniqueId, string? originType, int originId)
+        {
+            if (string.IsNullOrWhiteSpace(originType)) return null;
+            return CriticalCounts.GetValueOrDefault($"{heroUniqueId}:{originType}:{originId}");
+        }
+        public void IncrementMiss(int heroUniqueId, string originType, int originId)
+        {
+            var key = $"{heroUniqueId}:{originType}:{originId}";
+            MissCounts[key] = MissCounts.GetValueOrDefault(key) + 1;
+        }
+        public int? GetMissCount(int heroUniqueId, string? originType, int originId)
+        {
+            if (string.IsNullOrWhiteSpace(originType)) return null;
+            return MissCounts.GetValueOrDefault($"{heroUniqueId}:{originType}:{originId}");
         }
     }
 
