@@ -9,23 +9,23 @@ type CodexRarityKey = 'rare' | 'legendary' | 'set' | 'unique' | 'mythic';
 type CodexSnapshot = { updatedAt: string | null; items: any[]; affixPools: Array<{ id: number; stats: any[] }>; rarities: any[] };
 type ScannerFilter = { id: string; title: string; groupId: string | null; enabled: boolean; itemKeys: string[]; anchorItemKey: string | null; statIds: number[]; minimumAttributeMatches: number };
 type ScannerFilterGroup = { id: string; title: string; collapsed: boolean };
-type ScannerPersistedState = { schemaVersion: number; filters: ScannerFilter[]; groups: ScannerFilterGroup[]; autoEnabled: boolean };
-type ScannerMatch = any & { _matchedFilterIds: string[] };
+type ScannerPersistedState = { schemaVersion: number; filters: ScannerFilter[]; groups: ScannerFilterGroup[]; autoEnabled: boolean; includeWarehouse: boolean };
+type ScannerMatch = any & { _matchId: string; _matchedFilterIds: string[] };
+type ScannerRuntime = { matches: ScannerMatch[]; hasRun: boolean; scanning: boolean; error: string | null; updatedAt: string | null; matchNotificationId: string | null; autoEnabled?: boolean; includeWarehouse?: boolean; configurationUpdatedAt?: string | null };
 type IconProgress = { total: number; completed: number; pending: number; complete: boolean };
 type TelemetryState = {
   connected: boolean;
   gameRunning: boolean;
+  modVersion?: string | null;
   updatedAt: string | null;
   snapshotUpdatedAt?: string | null;
   slotsUpdatedAt?: string | null;
-  inventoryUpdatedAt?: string | null;
-  inventoryItemAdded?: TelemetryEvent | null;
   iconProgress?: IconProgress | null;
   heroes: unknown[];
   slots: Array<{ battleIndex: number; heroes: unknown[] }>;
   resources: unknown[];
   sanctum: { floor?: number | null; resourceBonusRate?: number | null } | null;
-  inventory: unknown[];
+  scanner: ScannerRuntime;
   battles: TelemetryEvent[];
   events: TelemetryEvent[];
   catalogs: Record<string, any[]>;
@@ -73,8 +73,9 @@ class BattleHeroDpsComponent {
     <ng-template #dashboard>
     <main class="mx-auto flex h-dvh max-w-7xl flex-col overflow-hidden p-3 md:p-5">
       <header class="mb-4 flex shrink-0 flex-wrap items-end justify-between gap-3">
-        <div>
+        <div class="flex items-baseline gap-2">
           <h1 class="text-3xl font-semibold tracking-tight">Path of Idle Stats</h1>
+          <span *ngIf="state().modVersion as version" class="font-mono text-xs text-zinc-500">v{{ version }}</span>
         </div>
         <div class="flex items-center gap-2">
           <button type="button" (click)="refreshHeroes()" [disabled]="refreshing()" class="rounded-full border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-300 hover:border-amber-700 disabled:opacity-50">{{ refreshing() ? 'Requested…' : 'Refresh heroes' }}</button>
@@ -285,7 +286,7 @@ class BattleHeroDpsComponent {
       <section *ngIf="selectedPageTab() === 'scanner'" aria-label="Inventory scanner" class="space-y-4">
         <div class="flex items-center gap-2">
           <button type="button" (click)="scanInventory()" [disabled]="scannerScanning() || !state().gameRunning || !hasRunnableScannerFilters()" class="rounded-lg border border-emerald-700 bg-emerald-950/30 px-4 py-2 text-sm font-semibold text-emerald-300 transition hover:bg-emerald-950/60 disabled:cursor-not-allowed disabled:opacity-40">
-            <i class="fa-solid fa-magnifying-glass mr-2" aria-hidden="true"></i>{{ scannerScanning() ? 'Scanning…' : 'Scan all storage' }}
+            <i class="fa-solid fa-magnifying-glass mr-2" aria-hidden="true"></i>{{ scannerScanning() ? 'Scanning…' : (scannerIncludeWarehouse() ? 'Scan all storage' : 'Scan inventory') }}
           </button>
           <button type="button" (click)="createScannerFilter()" [disabled]="codexLoading()" class="rounded-lg border border-amber-700 bg-amber-950/30 px-4 py-2 text-sm font-semibold text-amber-300 transition hover:bg-amber-950/60 disabled:opacity-40">
             <i class="fa-solid fa-plus mr-2" aria-hidden="true"></i>Create item filter
@@ -295,6 +296,12 @@ class BattleHeroDpsComponent {
           </button>
           <span *ngIf="scannerError()" class="ml-2 text-sm text-rose-300">{{ scannerError() }}</span>
           <div class="ml-auto flex items-center gap-1.5">
+            <label class="flex cursor-pointer select-none items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-zinc-300 hover:bg-zinc-900">
+              <input type="checkbox" [checked]="scannerIncludeWarehouse()" (change)="setScannerIncludeWarehouse($event)" class="peer sr-only">
+              <span class="relative h-5 w-9 rounded-full border border-zinc-700 bg-zinc-900 transition peer-checked:border-cyan-600 peer-checked:bg-cyan-950"><span class="absolute left-0.5 top-0.5 h-3.5 w-3.5 rounded-full transition" [class.translate-x-4]="scannerIncludeWarehouse()" [class.bg-cyan-300]="scannerIncludeWarehouse()" [class.bg-zinc-500]="!scannerIncludeWarehouse()"></span></span>
+              <span>Warehouse</span>
+            </label>
+            <button type="button" (pointerenter)="showScannerWarehouseTooltip($event)" (pointerleave)="hideTooltips()" aria-label="About including warehouse storage" class="flex h-7 w-7 items-center justify-center rounded-full text-zinc-600 hover:text-zinc-300"><i class="fa-solid fa-circle-info text-xs" aria-hidden="true"></i></button>
             <label class="flex cursor-pointer select-none items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-zinc-300 hover:bg-zinc-900">
               <input type="checkbox" [checked]="scannerAutoEnabled()" (change)="setScannerAutoEnabled($event)" class="peer sr-only">
               <span class="relative h-5 w-9 rounded-full border border-zinc-700 bg-zinc-900 transition peer-checked:border-emerald-600 peer-checked:bg-emerald-950"><span class="absolute left-0.5 top-0.5 h-3.5 w-3.5 rounded-full transition" [class.translate-x-4]="scannerAutoEnabled()" [class.bg-emerald-300]="scannerAutoEnabled()" [class.bg-zinc-500]="!scannerAutoEnabled()"></span></span>
@@ -312,7 +319,7 @@ class BattleHeroDpsComponent {
             </div>
           </div>
         </section>
-        <p *ngIf="scannerHasRun() && !scannerMatches().length && !scannerScanning()" class="rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-6 text-center text-sm text-zinc-500">No items in the inventory, warehouse storage, or warehouse vault matched the enabled filters.</p>
+        <p *ngIf="scannerHasRun() && !scannerMatches().length && !scannerScanning()" class="rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-6 text-center text-sm text-zinc-500">No items in the {{ scannerIncludeWarehouse() ? 'inventory, warehouse storage, or warehouse vault' : 'inventory' }} matched the enabled filters.</p>
 
         <ng-template #scannerFilterCard let-filter let-filterIndex="filterIndex">
           <article [class]="draggingScannerFilterId() === filter.id ? 'min-w-0 rounded-xl border border-amber-600 bg-zinc-950 p-3 opacity-50 shadow-lg' : 'min-w-0 rounded-xl border border-zinc-700 bg-zinc-950 p-3 transition hover:border-zinc-600'">
@@ -476,8 +483,8 @@ class BattleHeroDpsComponent {
           </ng-container>
         </ng-container>
         <ng-template #scannerNonMatchTooltip>
-          <ng-container *ngIf="$any(tooltip).kind === 'disabled'; else scannerAutoTooltip"><strong class="block text-sm text-rose-300">Disabled for item(s):</strong><span class="mt-1 block text-xs text-zinc-300" *ngFor="let item of $any(tooltip).items">{{ $any(item).englishName || $any(item).name }} ({{ scannerRarityLabel($any(item).rarity) }})</span></ng-container>
-          <ng-template #scannerAutoTooltip><p class="text-xs leading-relaxed text-zinc-300">When Auto is enabled, each new item added to the inventory is compared against the enabled filters.</p></ng-template>
+          <ng-container *ngIf="$any(tooltip).kind === 'disabled'; else scannerOptionTooltip"><strong class="block text-sm text-rose-300">Disabled for item(s):</strong><span class="mt-1 block text-xs text-zinc-300" *ngFor="let item of $any(tooltip).items">{{ $any(item).englishName || $any(item).name }} ({{ scannerRarityLabel($any(item).rarity) }})</span></ng-container>
+          <ng-template #scannerOptionTooltip><p class="text-xs leading-relaxed text-zinc-300">{{ $any(tooltip).kind === 'warehouse' ? 'When Warehouse is enabled, manual scans also inspect warehouse storage and the warehouse vault. Turn it off for the fastest inventory-only scan.' : 'When Auto is enabled, the backend compares each newly added inventory item against enabled filters immediately. It does not poll or rescan storage.' }}</p></ng-template>
         </ng-template>
       </div>
 
@@ -704,9 +711,10 @@ class AppComponent implements OnInit, OnDestroy {
   readonly scannerMatches = signal<ScannerMatch[]>([]);
   readonly scannerError = signal<string | null>(null);
   readonly scannerAutoEnabled = signal(false);
+  readonly scannerIncludeWarehouse = signal(true);
   readonly scannerPersistenceReady = signal(false);
   readonly scannerPersistenceError = signal<string | null>(null);
-  readonly scannerTooltip = signal<{ kind: 'match'; item: ScannerMatch } | { kind: 'disabled'; items: any[] } | { kind: 'auto' } | null>(null);
+  readonly scannerTooltip = signal<{ kind: 'match'; item: ScannerMatch } | { kind: 'disabled'; items: any[] } | { kind: 'auto' | 'warehouse' } | null>(null);
   readonly catalogs = signal<Record<string, any[]>>({});
   readonly selectedHero = signal<any | null>(null);
   readonly historicalBattleContext = signal<any | null>(null);
@@ -826,7 +834,7 @@ class AppComponent implements OnInit, OnDestroy {
     const entries = this.currentDamageDone()?.entries;
     return Array.isArray(entries) ? entries : [];
   });
-  readonly state = signal<TelemetryState>({ connected: false, gameRunning: false, updatedAt: null, iconProgress: null, heroes: [], slots: [], resources: [], sanctum: null, inventory: [], battles: [], events: [], catalogs: {} });
+  readonly state = signal<TelemetryState>({ connected: false, gameRunning: false, updatedAt: null, iconProgress: null, heroes: [], slots: [], resources: [], sanctum: null, scanner: { matches: [], hasRun: false, scanning: false, error: null, updatedAt: null, matchNotificationId: null, autoEnabled: false, includeWarehouse: true, configurationUpdatedAt: null }, battles: [], events: [], catalogs: {} });
   readonly iconLoadingFinished = signal(false);
   readonly showIconLoader = computed(() => !this.iconLoadingFinished());
   readonly iconLoadingTotal = computed(() => Math.max(0, Number(this.state().iconProgress?.total) || 0));
@@ -846,11 +854,11 @@ class AppComponent implements OnInit, OnDestroy {
   private activeTooltipId?: string;
   private activeTooltipAnchor?: HTMLElement;
   private catalogRefreshRequested = false;
-  private lastInventoryItemAddedTimestamp: string | null = null;
+  private lastScannerMatchNotificationId: string | null = null;
   private scannerAudioContext?: AudioContext;
   private scannerPersistenceTimer?: number;
   private scannerPersistenceDirty = false;
-  private scannerPersistenceSaving = false;
+  private scannerPersistenceInFlight?: Promise<void>;
   private destroyed = false;
   private readonly iconRetryTimers = new Set<number>();
   private readonly nativeImageError = (event: Event) => {
@@ -902,8 +910,8 @@ class AppComponent implements OnInit, OnDestroy {
       ]);
       this.catalogs.set(catalogs);
       this.state.set({ ...live, catalogs });
+      this.applyScannerRuntime(live.scanner, false);
       if (live.iconProgress?.complete && Number(live.iconProgress?.total) > 0) this.iconLoadingFinished.set(true);
-      this.lastInventoryItemAddedTimestamp = live.inventoryItemAdded?.timestamp || null;
       if (live.gameRunning) void this.refreshTalentCatalogIfNeeded();
     } catch { /* server stream will retry */ }
     this.stream = new EventSource('/api/stream');
@@ -913,8 +921,8 @@ class AppComponent implements OnInit, OnDestroy {
       const previousSnapshotTimestamp = this.latestSlotSnapshotTimestamp(this.state());
       const next = this.reconcileTelemetryState(this.state(), JSON.parse(event.data));
       this.state.set(next);
+      this.applyScannerRuntime(next.scanner, true);
       if (next.iconProgress?.complete && Number(next.iconProgress?.total) > 0) this.iconLoadingFinished.set(true);
-      this.handleInventoryItemAdded(next.inventoryItemAdded || null);
       if (next.gameRunning) void this.refreshTalentCatalogIfNeeded();
       this.scheduleTooltipAnchorValidation();
       if (this.recording() && this.recordingBattleSlot != null) {
@@ -1100,7 +1108,7 @@ class AppComponent implements OnInit, OnDestroy {
     return [...stats.values()];
   }
   trackScannerFilter(_index: number, filter: ScannerFilter): string { return filter.id; }
-  readonly trackScannerMatch = (_index: number, item: ScannerMatch): string => this.scannerItemIdentity(item);
+  readonly trackScannerMatch = (_index: number, item: ScannerMatch): string => item?._matchId || this.scannerItemIdentity(item);
   trackInventoryAffix(_index: number, stat: any): string { return `${stat?.id ?? 'unknown'}:${stat?.rank ?? 'unknown'}:${_index}`; }
   inventoryAffixText(stat: any): string { return this.plainGameText(stat?.displayDescription || stat?.englishDescription || stat?.description || 'Unknown attribute'); }
   scannerStorageLabel(item: any): string {
@@ -1296,10 +1304,18 @@ class AppComponent implements OnInit, OnDestroy {
   setScannerAutoEnabled(event: Event) {
     const enabled = (event.target as HTMLInputElement).checked;
     this.scannerAutoEnabled.set(enabled);
+    this.state.update(current => ({ ...current, scanner: { ...current.scanner, autoEnabled: enabled } }));
     this.writeLocalStorage('path-of-idle-stats.scanner.auto', String(enabled));
     this.scheduleScannerServerSave();
-    this.lastInventoryItemAddedTimestamp = this.state().inventoryItemAdded?.timestamp || null;
     if (enabled) this.prepareScannerSound();
+  }
+  setScannerIncludeWarehouse(event: Event) {
+    const enabled = (event.target as HTMLInputElement).checked;
+    this.scannerIncludeWarehouse.set(enabled);
+    this.state.update(current => ({ ...current, scanner: { ...current.scanner, includeWarehouse: enabled } }));
+    this.writeLocalStorage('path-of-idle-stats.scanner.include-warehouse', String(enabled));
+    this.scheduleScannerServerSave();
+    this.invalidateScannerResults();
   }
   setScannerMinimumAttributeMatches(event: Event) {
     const current = this.editingScannerFilter();
@@ -1333,7 +1349,12 @@ class AppComponent implements OnInit, OnDestroy {
   private removeScannerItemByKey(key: string) {
     const current = this.editingScannerFilter();
     if (!current) return;
-    this.updateScannerFilter(current.id, filter => ({ ...filter, itemKeys: filter.itemKeys.filter(itemKey => itemKey !== key), anchorItemKey: filter.anchorItemKey === key ? null : filter.anchorItemKey }));
+    this.updateScannerFilter(current.id, filter => {
+      const itemKeys = filter.itemKeys.filter(itemKey => itemKey !== key);
+      const anchorItemKey = filter.anchorItemKey && itemKeys.includes(filter.anchorItemKey) ? filter.anchorItemKey : itemKeys[0] ?? null;
+      return { ...filter, itemKeys, anchorItemKey };
+    });
+    this.pruneScannerStats(current.id);
   }
   addScannerStat(stat: any) {
     const current = this.editingScannerFilter();
@@ -1352,29 +1373,19 @@ class AppComponent implements OnInit, OnDestroy {
     this.prepareScannerSound();
     this.scannerScanning.set(true);
     this.scannerError.set(null);
-    const previousTimestamp = this.state().inventoryUpdatedAt || null;
     try {
-      const request = await fetch('/api/inventory/refresh', { method: 'POST' });
-      if (!request.ok) throw new Error('The backend rejected the inventory request.');
-      let live: TelemetryState | null = null;
-      for (let attempt = 0; attempt < 60 && !this.destroyed; attempt++) {
-        await new Promise(resolve => window.setTimeout(resolve, 250));
-        const candidate = await fetch('/api/state').then(response => response.json()) as TelemetryState;
-        if (candidate.inventoryUpdatedAt && candidate.inventoryUpdatedAt !== previousTimestamp) { live = candidate; break; }
+      // Flush pending filter/option edits so the backend and plugin scan exactly
+      // the configuration visible in this tab. The request then remains open
+      // until the event-driven plugin response arrives; there is no browser poll.
+      if (this.scannerPersistenceTimer) {
+        window.clearTimeout(this.scannerPersistenceTimer);
+        this.scannerPersistenceTimer = undefined;
       }
-      if (!live) throw new Error('The game did not return the inventory in time.');
-      this.state.set({ ...live, catalogs: this.catalogs() });
-      const enabled = this.scannerFilters().filter(filter => filter.enabled && filter.itemKeys.length);
-      const matches = new Map<string, ScannerMatch>();
-      for (const item of (live.inventory || []) as any[]) {
-        const matching = this.matchingScannerFilters(item, enabled);
-        if (!matching.length) continue;
-        const key = this.scannerItemIdentity(item);
-        matches.set(key, { ...item, _matchedFilterIds: matching.map(filter => filter.id) });
-      }
-      this.scannerMatches.set([...matches.values()]);
-      this.scannerHasRun.set(true);
-      if (matches.size) this.playScannerMatchSound();
+      await this.flushScannerServerState();
+      const request = await fetch('/api/scanner/scan', { method: 'POST' });
+      const result = await request.json().catch(() => null);
+      if (!request.ok) throw new Error(result?.error || 'The backend rejected the storage scan.');
+      this.applyScannerRuntime(result, true);
     } catch (error) {
       this.scannerError.set(error instanceof Error ? error.message : 'Inventory scan failed.');
     } finally { this.scannerScanning.set(false); }
@@ -1384,30 +1395,24 @@ class AppComponent implements OnInit, OnDestroy {
     await this.refreshCodex();
     if (!this.codexSnapshot().items.length && !this.codexError()) this.scannerError.set('The game returned no Codex item definitions.');
   }
-  private matchingScannerFilters(item: any, candidates = this.scannerFilters().filter(filter => filter.enabled && filter.itemKeys.length)): ScannerFilter[] {
-    const itemKey = this.codexItemKey(item);
-    const affixIds = new Set((Array.isArray(item?.affixes) ? item.affixes : []).map((affix: any) => Number(affix?.id)));
-    return candidates.filter(filter => {
-      if (!filter.itemKeys.includes(itemKey)) return false;
-      if (!filter.statIds.length) return true;
-      const matchedAttributeCount = filter.statIds.reduce((count, id) => count + (affixIds.has(Number(id)) ? 1 : 0), 0);
-      return matchedAttributeCount >= filter.minimumAttributeMatches;
-    });
-  }
-  private handleInventoryItemAdded(event: TelemetryEvent | null) {
-    const timestamp = event?.timestamp || null;
-    if (!timestamp || timestamp === this.lastInventoryItemAddedTimestamp) return;
-    this.lastInventoryItemAddedTimestamp = timestamp;
-    if (!this.scannerAutoEnabled()) return;
-    const item = (event?.payload as any)?.item;
-    if (!item) return;
-    const matching = this.matchingScannerFilters(item);
-    if (!matching.length) return;
-    const match: ScannerMatch = { ...item, _matchedFilterIds: matching.map(filter => filter.id) };
-    const key = this.scannerItemIdentity(item, timestamp);
-    this.scannerMatches.update(items => [match, ...items.filter(existing => this.scannerItemIdentity(existing) !== key)]);
-    this.scannerHasRun.set(true);
-    this.playScannerMatchSound();
+  private applyScannerRuntime(runtime: ScannerRuntime | null | undefined, allowSound: boolean) {
+    if (!runtime) return;
+    const notificationId = runtime.matchNotificationId || null;
+    const shouldPlay = allowSound && !!notificationId && notificationId !== this.lastScannerMatchNotificationId;
+    this.lastScannerMatchNotificationId = notificationId;
+    this.scannerMatches.set(Array.isArray(runtime.matches) ? runtime.matches : []);
+    this.scannerHasRun.set(runtime.hasRun === true);
+    this.scannerScanning.set(runtime.scanning === true);
+    this.scannerError.set(runtime.error || null);
+    if (typeof runtime.autoEnabled === 'boolean') {
+      this.scannerAutoEnabled.set(runtime.autoEnabled);
+      this.writeLocalStorage('path-of-idle-stats.scanner.auto', String(runtime.autoEnabled));
+    }
+    if (typeof runtime.includeWarehouse === 'boolean') {
+      this.scannerIncludeWarehouse.set(runtime.includeWarehouse);
+      this.writeLocalStorage('path-of-idle-stats.scanner.include-warehouse', String(runtime.includeWarehouse));
+    }
+    if (shouldPlay) this.playScannerMatchSound();
   }
   private prepareScannerSound(): AudioContext | undefined {
     const AudioContextConstructor = window.AudioContext || (window as any).webkitAudioContext;
@@ -1461,7 +1466,7 @@ class AppComponent implements OnInit, OnDestroy {
     this.scheduleScannerServerSave();
   }
   private currentScannerPersistedState(): ScannerPersistedState {
-    return { schemaVersion: 1, filters: this.scannerFilters(), groups: this.scannerFilterGroups(), autoEnabled: this.scannerAutoEnabled() };
+    return { schemaVersion: 2, filters: this.scannerFilters(), groups: this.scannerFilterGroups(), autoEnabled: this.scannerAutoEnabled(), includeWarehouse: this.scannerIncludeWarehouse() };
   }
   private normalizeScannerGroups(value: unknown): ScannerFilterGroup[] {
     if (!Array.isArray(value)) return [];
@@ -1499,9 +1504,11 @@ class AppComponent implements OnInit, OnDestroy {
     this.scannerFilterGroups.set(groups);
     this.scannerFilters.set(filters);
     this.scannerAutoEnabled.set(value?.autoEnabled === true);
+    this.scannerIncludeWarehouse.set(value?.includeWarehouse !== false);
     this.writeLocalStorage('path-of-idle-stats.scanner.filters', JSON.stringify(filters));
     this.writeLocalStorage('path-of-idle-stats.scanner.filter-groups', JSON.stringify(groups));
     this.writeLocalStorage('path-of-idle-stats.scanner.auto', String(this.scannerAutoEnabled()));
+    this.writeLocalStorage('path-of-idle-stats.scanner.include-warehouse', String(this.scannerIncludeWarehouse()));
   }
   private async initializeScannerServerState() {
     try {
@@ -1531,12 +1538,16 @@ class AppComponent implements OnInit, OnDestroy {
     if (this.scannerPersistenceTimer) window.clearTimeout(this.scannerPersistenceTimer);
     this.scannerPersistenceTimer = window.setTimeout(() => {
       this.scannerPersistenceTimer = undefined;
-      void this.flushScannerServerState();
+      void this.flushScannerServerState().catch(() => undefined);
     }, 150);
   }
-  private async flushScannerServerState() {
-    if (this.scannerPersistenceSaving || !this.scannerPersistenceReady() || this.destroyed) return;
-    this.scannerPersistenceSaving = true;
+  private flushScannerServerState(): Promise<void> {
+    if (!this.scannerPersistenceReady() || this.destroyed) return Promise.resolve();
+    if (this.scannerPersistenceInFlight) return this.scannerPersistenceInFlight.then(() => this.scannerPersistenceDirty ? this.flushScannerServerState() : undefined);
+    this.scannerPersistenceInFlight = this.persistDirtyScannerState().finally(() => { this.scannerPersistenceInFlight = undefined; });
+    return this.scannerPersistenceInFlight;
+  }
+  private async persistDirtyScannerState() {
     try {
       while (this.scannerPersistenceDirty && !this.destroyed) {
         this.scannerPersistenceDirty = false;
@@ -1549,13 +1560,16 @@ class AppComponent implements OnInit, OnDestroy {
     } catch (error) {
       this.scannerPersistenceDirty = true;
       this.scannerPersistenceError.set(error instanceof Error ? error.message : 'Scanner settings could not be saved to the server.');
-    } finally { this.scannerPersistenceSaving = false; }
+      throw error;
+    }
   }
   private normalizeScannerFilter(filter: ScannerFilter): ScannerFilter {
     const selectedCount = filter.statIds.length;
     const requested = Number(filter.minimumAttributeMatches);
     const minimumAttributeMatches = selectedCount ? Math.max(1, Math.min(selectedCount, Number.isFinite(requested) ? Math.round(requested) : selectedCount)) : 1;
-    return { ...filter, minimumAttributeMatches };
+    const itemKeys = [...new Set(filter.itemKeys.map(String))];
+    const anchorItemKey = filter.anchorItemKey && itemKeys.includes(filter.anchorItemKey) ? filter.anchorItemKey : itemKeys[0] ?? null;
+    return { ...filter, itemKeys, anchorItemKey, minimumAttributeMatches };
   }
   private invalidateScannerResults() { this.scannerHasRun.set(false); this.scannerMatches.set([]); this.scannerError.set(null); }
   async refreshCodex() {
@@ -1617,10 +1631,11 @@ class AppComponent implements OnInit, OnDestroy {
       const storedScannerFilterGroups = JSON.parse(window.localStorage.getItem('path-of-idle-stats.scanner.filter-groups') || '[]');
       const storedScannerFilters = JSON.parse(window.localStorage.getItem('path-of-idle-stats.scanner.filters') || '[]');
       this.applyScannerPersistedState({
-        schemaVersion: 1,
+        schemaVersion: 2,
         filters: storedScannerFilters,
         groups: storedScannerFilterGroups,
-        autoEnabled: window.localStorage.getItem('path-of-idle-stats.scanner.auto') === 'true'
+        autoEnabled: window.localStorage.getItem('path-of-idle-stats.scanner.auto') === 'true',
+        includeWarehouse: window.localStorage.getItem('path-of-idle-stats.scanner.include-warehouse') !== 'false'
       });
       this.selectedAverageMapKeys.set(this.battleSlots.map(slot => this.normalizeAverageMapKey(window.localStorage.getItem(`path-of-idle-stats.battles.average-map.${slot}`))));
     } catch { /* localStorage can be unavailable in privacy-restricted contexts */ }
@@ -1670,7 +1685,14 @@ class AppComponent implements OnInit, OnDestroy {
     const slots = Array.isArray(incoming.slots) && incoming.slotsUpdatedAt !== current.slotsUpdatedAt
       ? incoming.slots
       : current.slots;
-    return { ...current, ...incoming, battles, slots, catalogs: this.catalogs() } as TelemetryState;
+    const scanner = incoming.scanner
+      && (incoming.scanner.updatedAt !== current.scanner?.updatedAt
+        || incoming.scanner.scanning !== current.scanner?.scanning
+        || incoming.scanner.matchNotificationId !== current.scanner?.matchNotificationId
+        || incoming.scanner.configurationUpdatedAt !== current.scanner?.configurationUpdatedAt)
+      ? incoming.scanner
+      : current.scanner;
+    return { ...current, ...incoming, battles, slots, scanner, catalogs: this.catalogs() } as TelemetryState;
   }
   private battleIdentity(battle: TelemetryEvent, index: number): string {
     const payload = (battle as any)?.payload;
@@ -2174,6 +2196,11 @@ class AppComponent implements OnInit, OnDestroy {
   showScannerAutoTooltip(event: PointerEvent) {
     this.hoveredTalent.set(null); this.hoveredStat.set(null); this.hoveredEffect.set(null);
     this.scannerTooltip.set({ kind: 'auto' });
+    this.activateTooltip(event, 'scanner-tooltip');
+  }
+  showScannerWarehouseTooltip(event: PointerEvent) {
+    this.hoveredTalent.set(null); this.hoveredStat.set(null); this.hoveredEffect.set(null);
+    this.scannerTooltip.set({ kind: 'warehouse' });
     this.activateTooltip(event, 'scanner-tooltip');
   }
   @HostListener('document:click')

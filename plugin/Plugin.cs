@@ -23,7 +23,7 @@ public sealed class Plugin : BasePlugin
 {
     public const string PluginGuid = "local.pathofidle.stats";
     public const string PluginName = "Path of Idle Stats";
-    public const string PluginVersion = "0.9.0";
+    public const string PluginVersion = "0.10.0";
 
     private static Plugin? Instance;
     private static readonly object StateLock = new();
@@ -133,8 +133,7 @@ public sealed class Plugin : BasePlugin
         var inventoryRequestPath = Path.Combine(telemetryDirectory, "inventory.request");
         if (File.Exists(inventoryRequestPath) && IsSaveDataReady())
         {
-            File.Delete(inventoryRequestPath);
-            EmitInventorySnapshot();
+            TryConsumeInventoryScanRequest(inventoryRequestPath);
         }
 
         var autoRequestPath = Path.Combine(telemetryDirectory, "auto.request");
@@ -633,65 +632,136 @@ public sealed class Plugin : BasePlugin
         });
     }
 
-    private static void EmitInventorySnapshot()
+    private sealed class ScannerFilterPlan
     {
+        public string Id { get; init; } = string.Empty;
+        public HashSet<int> StatIds { get; init; } = new();
+        public int MinimumAttributeMatches { get; init; }
+    }
+
+    private sealed class ScannerRequestPlan
+    {
+        public string RequestId { get; init; } = string.Empty;
+        public bool IncludeWarehouse { get; init; }
+        public Dictionary<string, List<ScannerFilterPlan>> FiltersByItemKey { get; init; } = new(StringComparer.Ordinal);
+    }
+
+    private static void TryConsumeInventoryScanRequest(string requestPath)
+    {
+        try
+        {
+            var json = File.ReadAllText(requestPath);
+            if (!json.TrimStart().StartsWith("{", StringComparison.Ordinal))
+            {
+                // Discard obsolete timestamp-only requests. The old implementation
+                // serialized every stored item and no current client uses it.
+                File.Delete(requestPath);
+                return;
+            }
+
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            var requestId = root.TryGetProperty("requestId", out var requestIdNode) ? requestIdNode.GetString() : null;
+            if (string.IsNullOrWhiteSpace(requestId)) throw new InvalidDataException("Scanner request has no requestId.");
+            var filtersByItemKey = new Dictionary<string, List<ScannerFilterPlan>>(StringComparer.Ordinal);
+            if (root.TryGetProperty("itemFilters", out var itemFiltersNode) && itemFiltersNode.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var itemFilterNode in itemFiltersNode.EnumerateArray())
+                {
+                    var itemKey = itemFilterNode.TryGetProperty("itemKey", out var itemKeyNode) ? itemKeyNode.GetString() : null;
+                    if (string.IsNullOrWhiteSpace(itemKey) || !itemFilterNode.TryGetProperty("filters", out var filtersNode) || filtersNode.ValueKind != JsonValueKind.Array) continue;
+                    var filters = new List<ScannerFilterPlan>();
+                    foreach (var filterNode in filtersNode.EnumerateArray())
+                    {
+                        var id = filterNode.TryGetProperty("id", out var idNode) ? idNode.GetString() : null;
+                        if (string.IsNullOrWhiteSpace(id)) continue;
+                        var statIds = new HashSet<int>();
+                        if (filterNode.TryGetProperty("statIds", out var statIdsNode) && statIdsNode.ValueKind == JsonValueKind.Array)
+                            foreach (var statIdNode in statIdsNode.EnumerateArray()) if (statIdNode.TryGetInt32(out var statId)) statIds.Add(statId);
+                        var minimum = filterNode.TryGetProperty("minimumAttributeMatches", out var minimumNode) && minimumNode.TryGetInt32(out var requestedMinimum)
+                            ? requestedMinimum : statIds.Count;
+                        filters.Add(new ScannerFilterPlan { Id = id, StatIds = statIds, MinimumAttributeMatches = statIds.Count == 0 ? 0 : Math.Max(1, Math.Min(statIds.Count, minimum)) });
+                    }
+                    if (filters.Count > 0) filtersByItemKey[itemKey] = filters;
+                }
+            }
+
+            var plan = new ScannerRequestPlan
+            {
+                RequestId = requestId,
+                IncludeWarehouse = root.TryGetProperty("includeWarehouse", out var includeWarehouseNode) && includeWarehouseNode.ValueKind == JsonValueKind.True,
+                FiltersByItemKey = filtersByItemKey
+            };
+            File.Delete(requestPath);
+            EmitScannerSnapshot(plan);
+        }
+        catch (JsonException)
+        {
+            // The backend writes a tiny control file. If this frame observes it
+            // while it is still being replaced, leave it for the next check.
+        }
+        catch (Exception error)
+        {
+            try { File.Delete(requestPath); } catch { }
+            Instance?.Log.LogWarning($"Storage scan request failed safely: {error.Message}");
+        }
+    }
+
+    private static void EmitScannerSnapshot(ScannerRequestPlan plan)
+    {
+        var startedAt = DateTimeOffset.UtcNow;
+        var inspectedCount = 0;
+        var matches = new List<Dictionary<string, object?>>();
         var dataMgr = ReadStatic("Game", "dataMgr");
         var seasonData = Read(dataMgr, "nowSeasonData");
         var lordData = Read(seasonData, "lordData");
         var bagData = Read(lordData, "lordBagData");
         var itemType = GameType("EItemType");
         var equipType = itemType is null ? null : Enum.ToObject(itemType, 2);
-        // GetFieldList(equip) reads the live inventory collection regardless of which
-        // bag page the player currently has open. It does not switch UI state or
-        // mutate/save anything.
+
         var inventoryFields = equipType is null ? null : InvokeInstance(bagData!, "GetFieldList", equipType);
-        var fieldEntries = ReadList(inventoryFields).ToList();
-        var items = new List<Dictionary<string, object?>>();
-        foreach (var (field, fallbackIndex) in fieldEntries.Select((field, index) => (field, index)))
+        foreach (var (field, fallbackIndex) in ReadList(inventoryFields).Select((field, index) => (field, index)))
         {
             var item = Read(field, "itemData");
             if (item is null) continue;
+            inspectedCount++;
+            if (!MatchesScannerPlan(item, plan)) continue;
             var described = DescribeItem(item);
             described["storageLocation"] = "inventory";
             described["inventoryIndex"] = ReadNullableInt(Read(field, "saveItemFieldData"), "index") ?? fallbackIndex;
-            items.Add(described);
+            matches.Add(described);
         }
 
-        var houseStoreData = ReadValues(Read(Read(seasonData, "townData"), "houseDic"))
-            .Select(house => Read(house, "houseStoreData"))
-            .FirstOrDefault(store => Read(store, "storeBaseData") is not null || Read(store, "storeTreaData") is not null);
-        var storeBaseData = Read(houseStoreData, "storeBaseData");
-        var warehousePages = ReadEntries(Read(storeBaseData, "storeDic"))
-            .Select((entry, ordinal) => new
-            {
-                Page = Read(entry, "Value"),
-                Key = ReadNullableInt(entry, "Key"),
-                Ordinal = ordinal
-            })
-            .Where(entry => entry.Page is not null)
-            .ToList();
-        var warehouseUsesZeroBasedKeys = warehousePages.Any(entry => entry.Key == 0);
-        foreach (var pageEntry in warehousePages)
+        if (plan.IncludeWarehouse)
         {
-            var storageTab = pageEntry.Key is { } key
-                ? key + (warehouseUsesZeroBasedKeys ? 1 : 0)
-                : pageEntry.Ordinal + 1;
-            foreach (var (field, fallbackIndex) in ReadList(pageEntry.Page).Select((field, index) => (field, index)))
+            var houseStoreData = ReadValues(Read(Read(seasonData, "townData"), "houseDic"))
+                .Select(house => Read(house, "houseStoreData"))
+                .FirstOrDefault(store => Read(store, "storeBaseData") is not null || Read(store, "storeTreaData") is not null);
+            var storeBaseData = Read(houseStoreData, "storeBaseData");
+            var warehousePages = ReadEntries(Read(storeBaseData, "storeDic"))
+                .Select((entry, ordinal) => new { Page = Read(entry, "Value"), Key = ReadNullableInt(entry, "Key"), Ordinal = ordinal })
+                .Where(entry => entry.Page is not null).ToList();
+            var warehouseUsesZeroBasedKeys = warehousePages.Any(entry => entry.Key == 0);
+            foreach (var pageEntry in warehousePages)
             {
-                var item = Read(field, "itemData");
-                if (!IsEquipmentItem(item)) continue;
-                var described = DescribeItem(item!);
-                described["storageLocation"] = "warehouse";
-                described["storagePage"] = storageTab;
-                described["storagePageKey"] = pageEntry.Key;
-                described["inventoryIndex"] = ReadNullableInt(Read(field, "saveItemFieldData"), "index") ?? fallbackIndex;
-                items.Add(described);
+                var storageTab = pageEntry.Key is { } key ? key + (warehouseUsesZeroBasedKeys ? 1 : 0) : pageEntry.Ordinal + 1;
+                foreach (var (field, fallbackIndex) in ReadList(pageEntry.Page).Select((field, index) => (field, index)))
+                {
+                    var item = Read(field, "itemData");
+                    if (!IsEquipmentItem(item)) continue;
+                    inspectedCount++;
+                    if (!MatchesScannerPlan(item!, plan)) continue;
+                    var described = DescribeItem(item!);
+                    described["storageLocation"] = "warehouse";
+                    described["storagePage"] = storageTab;
+                    described["storagePageKey"] = pageEntry.Key;
+                    described["inventoryIndex"] = ReadNullableInt(Read(field, "saveItemFieldData"), "index") ?? fallbackIndex;
+                    matches.Add(described);
+                }
             }
-        }
 
-        var storeTreaData = Read(houseStoreData, "storeTreaData");
-        foreach (var groupList in ReadValues(Read(storeTreaData, "equipGroupDic")))
-        {
+            var storeTreaData = Read(houseStoreData, "storeTreaData");
+            foreach (var groupList in ReadValues(Read(storeTreaData, "equipGroupDic")))
             foreach (var group in ReadList(groupList))
             {
                 var saveGroup = Read(group, "saveEquipGroupData");
@@ -699,16 +769,44 @@ public sealed class Plugin : BasePlugin
                 foreach (var (item, itemIndex) in ReadList(Read(group, "equipList")).Select((item, index) => (item, index)))
                 {
                     if (!IsEquipmentItem(item)) continue;
+                    inspectedCount++;
+                    if (!MatchesScannerPlan(item, plan)) continue;
                     var described = DescribeItem(item);
                     described["storageLocation"] = "vault";
                     described["storageGroupId"] = groupId;
                     described["inventoryIndex"] = itemIndex;
-                    items.Add(described);
+                    matches.Add(described);
                 }
             }
         }
-        ReportIconProgress(true);
-        Instance?.writer?.Enqueue("snapshot.inventory", new { source = "all-storage", items });
+
+        var durationMilliseconds = Math.Max(0, (DateTimeOffset.UtcNow - startedAt).TotalMilliseconds);
+        Instance?.writer?.EnqueuePriority("snapshot.scanner", new
+        {
+            requestId = plan.RequestId,
+            includeWarehouse = plan.IncludeWarehouse,
+            inspectedCount,
+            durationMilliseconds,
+            items = matches
+        });
+    }
+
+    private static bool MatchesScannerPlan(object item, ScannerRequestPlan plan)
+    {
+        var save = Read(item, "saveItemData") ?? item;
+        var id = ReadNullableInt(save, "id");
+        var quality = ReadNullableInt(save, "quality");
+        if (id is null || quality is null) return false;
+        var rarity = quality switch { 3 => "rare", 4 => "legendary", 5 => "mythic", 6 => "set", 8 => "unique", _ => "other" };
+        if (!plan.FiltersByItemKey.TryGetValue($"{rarity}:{id.Value}", out var filters)) return false;
+        if (filters.Any(filter => filter.MinimumAttributeMatches == 0)) return true;
+
+        var equip = Read(item, "itemEquipData");
+        var affixes = ReadList(Read(equip, "affixList")).ToList();
+        if (affixes.Count == 0) affixes = ReadList(Read(save, "affixList")).ToList();
+        var affixIds = affixes.Select(affix => ReadNullableInt(Read(affix, "saveData") ?? affix, "id") ?? ReadNullableInt(affix, "id"))
+            .Where(id => id is not null).Select(id => id!.Value).ToHashSet();
+        return filters.Any(filter => filter.StatIds.Count(id => affixIds.Contains(id)) >= filter.MinimumAttributeMatches);
     }
 
     private static void InventoryItemAddedPostfix(object __0, bool __result) => SafeHook("inventory-item-added", () =>
@@ -719,8 +817,10 @@ public sealed class Plugin : BasePlugin
         var item = DescribeItem(__0);
         item["storageLocation"] = "inventory";
         item["inventoryIndex"] = ReadNullableInt(__0, "fieldIndex");
-        ReportIconProgress(true);
-        Instance?.writer?.Enqueue("inventory.item-added", new { item });
+        // This hook is the automatic scanner's event source. It emits only the
+        // newly added equipment item; neither the plugin nor the backend polls
+        // the inventory or rescans existing storage for Auto mode.
+        Instance?.writer?.EnqueuePriority("inventory.item-added", new { item });
     });
 
     private static bool IsEquipmentItem(object? item)
@@ -2359,6 +2459,7 @@ internal sealed class TelemetryWriter : IDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
     private readonly ConcurrentQueue<string> queue = new();
+    private readonly ConcurrentQueue<string> priorityQueue = new();
     private readonly HttpClient client = new() { Timeout = TimeSpan.FromSeconds(1) };
     private readonly string fallbackPath;
     private readonly BepInEx.Logging.ManualLogSource log;
@@ -2375,12 +2476,17 @@ internal sealed class TelemetryWriter : IDisposable
         queue.Enqueue(JsonSerializer.Serialize(new { type, timestamp = DateTimeOffset.UtcNow, payload }, JsonOptions));
         _ = DrainAsync();
     }
+    public void EnqueuePriority(string type, object payload)
+    {
+        priorityQueue.Enqueue(JsonSerializer.Serialize(new { type, timestamp = DateTimeOffset.UtcNow, payload }, JsonOptions));
+        _ = DrainAsync();
+    }
     private async Task DrainAsync()
     {
         if (Interlocked.Exchange(ref draining, 1) != 0) return;
         try
         {
-            while (queue.TryDequeue(out var json)) try
+            while (priorityQueue.TryDequeue(out var json) || queue.TryDequeue(out json)) try
             {
                 using var content = new StringContent(json, Encoding.UTF8, "application/json");
                 using var response = await client.PostAsync("http://127.0.0.1:43127/api/events", content).ConfigureAwait(false);
@@ -2392,7 +2498,7 @@ internal sealed class TelemetryWriter : IDisposable
         finally
         {
             Volatile.Write(ref draining, 0);
-            if (!queue.IsEmpty) _ = DrainAsync();
+            if (!priorityQueue.IsEmpty || !queue.IsEmpty) _ = DrainAsync();
         }
     }
     public void Dispose() { client.Dispose(); }

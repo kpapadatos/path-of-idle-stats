@@ -176,7 +176,7 @@ Important paths and fields:
 
 ## Telemetry and HTTP API
 
-Current events include `heartbeat`, `battle.started`, `battle.ended`, `snapshot.slots`, `snapshot.heroes`, `snapshot.combat`, `snapshot.resources`, `snapshot.inventory`, and catalogs for talents, skills, abilities, materials, runes, tools, curios, and equipment. The plugin sends a lightweight heartbeat every two seconds. The backend does not persist heartbeats or add them to the event list; it broadcasts `gameRunning` only when presence changes and marks the game stopped after five seconds without a heartbeat.
+Current events include `heartbeat`, `battle.started`, `battle.ended`, `snapshot.slots`, `snapshot.heroes`, `snapshot.combat`, `snapshot.resources`, `snapshot.scanner`, `inventory.item-added`, and catalogs for talents, skills, abilities, materials, runes, tools, curios, and equipment. The plugin sends a lightweight heartbeat every two seconds. The backend does not persist heartbeats or add them to the event list; it broadcasts `gameRunning` only when presence changes and marks the game stopped after five seconds without a heartbeat.
 
 - `GET /api/health` — health and last update.
 - `GET /api/state` — live state excluding large catalogs.
@@ -186,12 +186,23 @@ Current events include `heartbeat`, `battle.started`, `battle.ended`, `snapshot.
 - `POST /api/snapshot` — creates `<game>\BepInEx\PathOfIdleStats\snapshot.request`.
 - `POST /api/combat-snapshot` — correlated request/response capture for one hero. It creates `combat-snapshot.request`, waits for the matching `snapshot.combat`, and returns the payload directly without broadcasting or replacing dashboard state.
 - `GET /api/battle-timelines/:battleId/heroes/:heroId` — decompresses and returns only the requested hero's retained one-second timeline for a historical battle.
+- `GET`/`PUT /api/scanner/state` — reads or atomically replaces the persisted scanner filters, groups, Auto setting, and warehouse setting.
+- `POST /api/scanner/scan` — correlated backend-owned full scan. It sends the compiled enabled filters and warehouse preference to the plugin, waits for one `snapshot.scanner` response, authoritatively revalidates candidates, updates the shared matches array, and returns it. Browser clients never poll `/api/state` for completion.
 - `DELETE /api/battles/0`, `/1`, or `/2` — clears one slot's history.
 - `GET /assets/icons/<sha256>.png` — local extracted icons.
 
 `Root.Update` consumes and deletes the general snapshot marker, then emits `snapshot.slots` and `snapshot.heroes`. Timeline capture uses a separate hero-specific path: the request carries `requestId` and `heroUniqueId`, the plugin extracts only live stats, effects, health/death state, and damage-meter data for that hero, and the backend resolves only the matching browser request. The telemetry writer drains immediately when an event is enqueued rather than polling every 250 ms. A general marker may be queued while the game is closed and consumed after the game starts and a save is entered.
 
 Live state is held in memory, while the retained newest 50 completed battles per slot and scanner configuration are persisted in `data/path-of-idle-stats.sqlite`. Historical combat timelines are gzip-compressed into a separate `battle_timelines` table and referenced from their owning battle by an opaque ID. History insertion, timeline insertion, retention pruning, and orphan-timeline deletion happen in one SQLite transaction. Battle history is restored at server startup, updated synchronously on every `battle.ended`, and updated by the per-slot reset endpoint. Completed battles are never appended to `data/events.jsonl`; that file is limited to smaller non-snapshot diagnostic events. The first SQLite-enabled startup migrates the newest legacy battles, commits them, and permanently deletes the old raw event log. Catalogs overwrite individual files in `data/catalogs/`.
+
+### Scanner architecture
+
+- The Node backend owns scanner execution and the live matches array. All browser tabs consume the same state over SSE; opening extra tabs never creates extra game scans or extra auto matchers.
+- Auto mode is event-driven. Harmony patches `LordBagData.addItemToBag`, the plugin describes only that newly added equipment item, and the backend compares it against a precompiled `itemKey -> filters` index. It never periodically scans inventory. `inventory.item-added` events are priority telemetry and are not written to the diagnostic JSONL file.
+- Manual scanning is one correlated request/response, not a browser polling loop. The backend supplies a compact compiled filter plan. The plugin performs cheap rarity/definition-ID and affix-ID checks while traversing storage and calls the expensive full item description path only for candidates. The backend repeats the exact filter match before publishing results.
+- `includeWarehouse` is persisted with scanner configuration. When false, manual scans inspect only the live bag. When true, they also traverse every warehouse tab and the warehouse vault. It does not affect Auto, whose hook represents newly added bag items.
+- Scanner matches are intentionally in-memory runtime state, while filters/groups/options remain in the single SQLite scanner-state row. Raw inventory snapshots are not sent to browser clients.
+- Removing the anchor/first selected filter item promotes another remaining selected item as the anchor. The primary-type restriction disappears only when no selected items remain.
 
 ## Dashboard product decisions
 
@@ -295,5 +306,7 @@ git status --short
 ```
 
 For plugin changes: close the game, build, update, verify DLL hashes, restart, enter the save, inspect the BepInEx log, request a snapshot, and confirm three slots plus hero/talent selection data.
+
+Release rule: unless the user explicitly says otherwise, every request to **commit and push** also means increment the patch component of `Plugin.PluginVersion`, rebuild and verify the bundled/installed DLL, commit the resulting release artifacts, create an annotated `v<version>` Git tag on that commit, and push both `main` and the tag. Never reuse or move an existing release tag.
 
 The public repository is [https://github.com/kpapadatos/path-of-idle-stats](https://github.com/kpapadatos/path-of-idle-stats); the default branch is `main`. Preserve reproducibility with pinned runtime versions, published archive hashes, bundled licenses, scripts, and verification checks. Never commit runtime telemetry or game-derived assets.

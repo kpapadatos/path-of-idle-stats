@@ -26,10 +26,15 @@ const codexRequest = join(telemetryDirectory, 'codex.request');
 const inventoryRequest = join(telemetryDirectory, 'inventory.request');
 const iconProgressFile = join(telemetryDirectory, 'icons.progress.json');
 const clients = new Set();
-const state = { connected: false, gameRunning: false, updatedAt: null, snapshotUpdatedAt: null, slotsUpdatedAt: null, inventoryUpdatedAt: null, inventoryItemAdded: null, iconProgress: null, heroes: [], slots: [], resources: [], sanctum: null, inventory: [], battles: [], events: [], catalogs: {} };
+const state = {
+  connected: false, gameRunning: false, updatedAt: null, snapshotUpdatedAt: null, slotsUpdatedAt: null,
+  modVersion: null, iconProgress: null, heroes: [], slots: [], resources: [], sanctum: null, battles: [], events: [], catalogs: {},
+  scanner: { matches: [], hasRun: false, scanning: false, error: null, updatedAt: null, matchNotificationId: null }
+};
 let codexSnapshot = { updatedAt: null, items: [], affixPools: [], rarities: [] };
 let lastGameHeartbeat = 0;
 const pendingCombatSnapshots = new Map();
+const pendingScannerScans = new Map();
 const battleHistoryLimitPerSlot = 50;
 await mkdir(dataDirectory, { recursive: true });
 try {
@@ -244,13 +249,96 @@ function validateScannerState(value) {
   if (!Array.isArray(value.filters) || !Array.isArray(value.groups)) throw new Error('Scanner state requires filters and groups arrays.');
   if (value.filters.some(filter => !filter || typeof filter !== 'object' || typeof filter.id !== 'string')) throw new Error('Every scanner filter requires a string id.');
   if (value.groups.some(group => !group || typeof group !== 'object' || typeof group.id !== 'string')) throw new Error('Every scanner group requires a string id.');
-  return { ...value, schemaVersion: Number(value.schemaVersion) || 1, autoEnabled: value.autoEnabled === true };
+  return {
+    ...value,
+    schemaVersion: Math.max(2, Number(value.schemaVersion) || 1),
+    autoEnabled: value.autoEnabled === true,
+    // Existing installations scanned all storage, so preserve that behavior
+    // when upgrading scanner state written before this option existed.
+    includeWarehouse: value.includeWarehouse !== false
+  };
+}
+
+const initialScannerState = readScannerState();
+let scannerConfiguration = validateScannerState(initialScannerState?.state ?? { schemaVersion: 2, filters: [], groups: [], autoEnabled: false, includeWarehouse: true });
+let scannerFilterIndex = compileScannerFilters(scannerConfiguration);
+state.scanner = {
+  ...state.scanner,
+  autoEnabled: scannerConfiguration.autoEnabled,
+  includeWarehouse: scannerConfiguration.includeWarehouse,
+  configurationUpdatedAt: initialScannerState?.updatedAt ?? null
+};
+
+function scannerCriteriaSignature(configuration) {
+  return JSON.stringify({
+    includeWarehouse: configuration?.includeWarehouse !== false,
+    filters: (configuration?.filters ?? []).map(filter => ({
+      id: filter.id,
+      enabled: filter.enabled !== false,
+      itemKeys: Array.isArray(filter.itemKeys) ? filter.itemKeys.map(String) : [],
+      statIds: Array.isArray(filter.statIds) ? filter.statIds.map(Number).filter(Number.isFinite) : [],
+      minimumAttributeMatches: Number(filter.minimumAttributeMatches) || 1
+    }))
+  });
+}
+
+function compileScannerFilters(configuration) {
+  const byItemKey = new Map();
+  for (const filter of configuration?.filters ?? []) {
+    if (filter?.enabled === false || !Array.isArray(filter?.itemKeys) || !filter.itemKeys.length) continue;
+    const statIds = new Set((Array.isArray(filter.statIds) ? filter.statIds : []).map(Number).filter(Number.isFinite));
+    const minimum = statIds.size ? Math.max(1, Math.min(statIds.size, Math.round(Number(filter.minimumAttributeMatches) || statIds.size))) : 0;
+    const compiled = { id: String(filter.id), statIds, minimum };
+    for (const key of filter.itemKeys.map(String)) {
+      const candidates = byItemKey.get(key);
+      if (candidates) candidates.push(compiled); else byItemKey.set(key, [compiled]);
+    }
+  }
+  return byItemKey;
+}
+
+function scannerItemKey(item) {
+  return String(item?.key || `${item?.rarity}:${item?.id}`);
+}
+
+function scannerItemIdentity(item, fallback = 'unknown') {
+  return `${item?.storageLocation || 'inventory'}:${item?.storagePage ?? item?.storageGroupId ?? 'none'}:${item?.inventoryIndex ?? fallback}:${scannerItemKey(item)}`;
+}
+
+function matchingScannerFilterIds(item) {
+  const candidates = scannerFilterIndex.get(scannerItemKey(item)) ?? [];
+  if (!candidates.length) return [];
+  const affixIds = new Set((Array.isArray(item?.affixes) ? item.affixes : []).map(affix => Number(affix?.id)).filter(Number.isFinite));
+  return candidates.filter(filter => filter.minimum === 0
+    || [...filter.statIds].reduce((count, id) => count + (affixIds.has(id) ? 1 : 0), 0) >= filter.minimum)
+    .map(filter => filter.id);
+}
+
+function decorateScannerMatch(item, matchedFilterIds, fallback) {
+  return { ...item, _matchId: scannerItemIdentity(item, fallback), _matchedFilterIds: matchedFilterIds };
+}
+
+function applyAutoScannerItem(event) {
+  if (!scannerConfiguration.autoEnabled) return;
+  const item = event?.payload?.item;
+  if (!item) return;
+  const matchedFilterIds = matchingScannerFilterIds(item);
+  if (!matchedFilterIds.length) return;
+  const match = decorateScannerMatch(item, matchedFilterIds, event.timestamp ?? randomUUID());
+  state.scanner = {
+    ...state.scanner,
+    matches: [match, ...state.scanner.matches.filter(existing => existing?._matchId !== match._matchId)],
+    hasRun: true,
+    error: null,
+    updatedAt: event.timestamp ?? new Date().toISOString(),
+    matchNotificationId: randomUUID()
+  };
 }
 
 async function persistScannerState(value, onlyIfEmpty = false) {
   const normalizedState = validateScannerState(value);
   const existing = readScannerState();
-  if (onlyIfEmpty && existing) return { imported: false, ...existing };
+  if (onlyIfEmpty && existing) return { imported: false, state: scannerConfiguration, updatedAt: existing.updatedAt };
   if (!existing) {
     await mkdir(scannerBackupDirectory, { recursive: true });
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -258,6 +346,16 @@ async function persistScannerState(value, onlyIfEmpty = false) {
   }
   const updatedAt = new Date().toISOString();
   writeScannerStateStatement.run(JSON.stringify(normalizedState), updatedAt);
+  const criteriaChanged = scannerCriteriaSignature(scannerConfiguration) !== scannerCriteriaSignature(normalizedState);
+  scannerConfiguration = normalizedState;
+  scannerFilterIndex = compileScannerFilters(scannerConfiguration);
+  state.scanner = {
+    ...state.scanner,
+    ...(criteriaChanged ? { matches: [], hasRun: false, error: null, updatedAt } : {}),
+    autoEnabled: scannerConfiguration.autoEnabled,
+    includeWarehouse: scannerConfiguration.includeWarehouse,
+    configurationUpdatedAt: updatedAt
+  };
   return { imported: !existing, state: normalizedState, updatedAt };
 }
 
@@ -268,6 +366,7 @@ function applyEvent(event, timelineRecord = null) {
   if (event.type === 'heartbeat') {
     lastGameHeartbeat = Date.now();
     state.gameRunning = true;
+    if (typeof event.payload?.pluginVersion === 'string' && event.payload.pluginVersion.trim()) state.modVersion = event.payload.pluginVersion.trim();
     // Heartbeats only maintain liveness. Broadcasting an unchanged full state
     // every second needlessly wakes Angular and recreates decoded JSON objects.
     if (gameWasRunning) return;
@@ -287,11 +386,8 @@ function applyEvent(event, timelineRecord = null) {
     state.resources = event.payload?.resources ?? [];
     state.sanctum = event.payload?.sanctum ?? state.sanctum;
   }
-  if (event.type === 'snapshot.inventory') {
-    state.inventory = event.payload?.items ?? event.payload ?? [];
-    state.inventoryUpdatedAt = event.timestamp;
-  }
-  if (event.type === 'inventory.item-added') state.inventoryItemAdded = event;
+  if (event.type === 'inventory.item-added') applyAutoScannerItem(event);
+  if (event.type === 'snapshot.scanner') completeScannerScan(event);
   if (event.type === 'snapshot.codex') codexSnapshot = { updatedAt: event.timestamp, ...(event.payload ?? {}) };
   if (event.type.startsWith('catalog.')) state.catalogs[event.type.slice(8)] = event.payload?.entries ?? [];
   if (event.type === 'battle.ended') {
@@ -303,12 +399,10 @@ function applyEvent(event, timelineRecord = null) {
   for (const client of clients) client.write(message);
 }
 
-function publicState(includeInventory = true) {
-  const { catalogs, events, heroes, ...live } = state;
+function publicState() {
+  const { catalogs, events, heroes, inventory, inventoryUpdatedAt, inventoryItemAdded, ...live } = state;
   const battles = live.battles.map(publicBattleSummary);
-  if (includeInventory) return { ...live, battles, events: [], heroes: [] };
-  const { inventory, ...streamable } = live;
-  return { ...streamable, battles, events: [], heroes: [] };
+  return { ...live, battles, events: [], heroes: [] };
 }
 
 const publicBattleSummaryCache = new WeakMap();
@@ -383,6 +477,78 @@ function completeCombatSnapshot(event) {
   return true;
 }
 
+function scannerRequestFilters() {
+  return [...scannerFilterIndex.entries()].map(([itemKey, filters]) => ({
+    itemKey,
+    filters: filters.map(filter => ({ id: filter.id, statIds: [...filter.statIds], minimumAttributeMatches: filter.minimum }))
+  }));
+}
+
+async function requestScannerScan() {
+  if (!state.gameRunning) throw Object.assign(new Error('Start the game and enter your save before scanning.'), { statusCode: 409 });
+  if (pendingScannerScans.size > 0 || state.scanner.scanning) throw Object.assign(new Error('A storage scan is already in progress.'), { statusCode: 409 });
+  if (!scannerFilterIndex.size) throw Object.assign(new Error('Enable at least one configured item filter before scanning.'), { statusCode: 400 });
+
+  const requestId = randomUUID();
+  const requestedAt = new Date().toISOString();
+  state.scanner = { ...state.scanner, scanning: true, error: null, updatedAt: requestedAt };
+  broadcastState();
+  await mkdir(dirname(inventoryRequest), { recursive: true });
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      pendingScannerScans.delete(requestId);
+      state.scanner = { ...state.scanner, scanning: false, error: 'The game did not return the storage scan in time.', updatedAt: new Date().toISOString() };
+      broadcastState();
+      reject(Object.assign(new Error(state.scanner.error), { statusCode: 504 }));
+    }, 15000);
+    pendingScannerScans.set(requestId, { resolve, reject, timeout });
+    writeFile(inventoryRequest, JSON.stringify({
+      requestId,
+      includeWarehouse: scannerConfiguration.includeWarehouse,
+      itemFilters: scannerRequestFilters()
+    }), 'utf8').catch(error => {
+      clearTimeout(timeout);
+      pendingScannerScans.delete(requestId);
+      state.scanner = { ...state.scanner, scanning: false, error: error.message, updatedAt: new Date().toISOString() };
+      broadcastState();
+      reject(error);
+    });
+  });
+}
+
+function completeScannerScan(event) {
+  const requestId = event?.payload?.requestId;
+  const pending = typeof requestId === 'string' ? pendingScannerScans.get(requestId) : null;
+  if (!pending) return false;
+  clearTimeout(pending.timeout);
+  pendingScannerScans.delete(requestId);
+
+  const uniqueMatches = new Map();
+  for (const [index, item] of (Array.isArray(event?.payload?.items) ? event.payload.items : []).entries()) {
+    const matchedFilterIds = matchingScannerFilterIds(item);
+    if (!matchedFilterIds.length) continue;
+    const match = decorateScannerMatch(item, matchedFilterIds, index);
+    uniqueMatches.set(match._matchId, match);
+  }
+  const matches = [...uniqueMatches.values()];
+  const completedAt = event.timestamp ?? new Date().toISOString();
+  state.scanner = {
+    ...state.scanner,
+    matches,
+    hasRun: true,
+    scanning: false,
+    error: event?.payload?.error ? String(event.payload.error) : null,
+    updatedAt: completedAt,
+    matchNotificationId: matches.length ? randomUUID() : state.scanner.matchNotificationId,
+    inspectedCount: Number(event?.payload?.inspectedCount) || 0,
+    durationMilliseconds: Number(event?.payload?.durationMilliseconds) || 0,
+    includedWarehouse: event?.payload?.includeWarehouse === true
+  };
+  pending.resolve(state.scanner);
+  return true;
+}
+
 function broadcastState() {
   const message = `data: ${JSON.stringify(publicState(false))}\n\n`;
   for (const client of clients) client.write(message);
@@ -414,14 +580,20 @@ const server = createServer(async (request, response) => {
     if (request.method === 'GET' && url.pathname === '/api/codex') return json(response, 200, codexSnapshot);
     if (request.method === 'GET' && url.pathname === '/api/scanner/state') {
       const stored = readScannerState();
-      return json(response, 200, stored ? { exists: true, ...stored } : { exists: false, state: null, updatedAt: null });
+      return json(response, 200, stored ? { exists: true, state: scannerConfiguration, updatedAt: stored.updatedAt } : { exists: false, state: null, updatedAt: null });
     }
     if (request.method === 'POST' && url.pathname === '/api/scanner/state/import') {
       const result = await persistScannerState(JSON.parse(await readBody(request)), true);
       return json(response, result.imported ? 201 : 200, result);
     }
     if (request.method === 'PUT' && url.pathname === '/api/scanner/state') {
-      return json(response, 200, await persistScannerState(JSON.parse(await readBody(request))));
+      const result = await persistScannerState(JSON.parse(await readBody(request)));
+      broadcastState();
+      return json(response, 200, result);
+    }
+    if (request.method === 'POST' && url.pathname === '/api/scanner/scan') {
+      try { return json(response, 200, await requestScannerScan()); }
+      catch (error) { return json(response, error?.statusCode ?? 500, { error: error?.message ?? 'Storage scan failed.' }); }
     }
     if (request.method === 'POST' && url.pathname === '/api/catalogs/refresh') {
       await mkdir(dirname(catalogRequest), { recursive: true });
@@ -431,11 +603,6 @@ const server = createServer(async (request, response) => {
     if (request.method === 'POST' && url.pathname === '/api/codex/refresh') {
       await mkdir(dirname(codexRequest), { recursive: true });
       await writeFile(codexRequest, new Date().toISOString(), 'utf8');
-      return json(response, 202, { requested: true });
-    }
-    if (request.method === 'POST' && url.pathname === '/api/inventory/refresh') {
-      await mkdir(dirname(inventoryRequest), { recursive: true });
-      await writeFile(inventoryRequest, new Date().toISOString(), 'utf8');
       return json(response, 202, { requested: true });
     }
     if (request.method === 'POST' && url.pathname === '/api/snapshot') {
@@ -491,7 +658,7 @@ const server = createServer(async (request, response) => {
         const catalogDirectory = join(dataDirectory, 'catalogs');
         await mkdir(catalogDirectory, { recursive: true });
         await import('node:fs/promises').then(({ writeFile }) => writeFile(join(catalogDirectory, event.type.slice(8) + '.json'), JSON.stringify(event.payload), 'utf8'));
-      } else if (event.type !== 'heartbeat' && event.type !== 'battle.ended' && !event.type.startsWith('snapshot.')) {
+      } else if (event.type !== 'heartbeat' && event.type !== 'battle.ended' && event.type !== 'inventory.item-added' && !event.type.startsWith('snapshot.')) {
         await appendFile(eventLog, JSON.stringify(event) + '\n', 'utf8');
       }
       if (event.type === 'battle.ended') {

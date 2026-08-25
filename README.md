@@ -49,8 +49,11 @@ The bundled runtime provenance and fingerprints are recorded in [`vendor/THIRD-P
 
 ## Updating
 
+> [!IMPORTANT]
+> Paste the new version's files into your **existing Path of Idle Stats folder** and choose **Replace/overwrite** when Windows asks. Do **not** extract each version into a new folder, and do not delete the existing folder first. Local data—including item filters and filter groups—is stored in the existing folder's `data` directory and is not included in release ZIP files.
+
 1. Close Path of Idle.
-2. Replace the extracted project files with the latest release/source ZIP, or run `git pull` if you cloned the repository.
+2. Open the latest release/source ZIP, copy all of its contents into the existing Path of Idle Stats folder, and overwrite the old version files. If you cloned the repository instead, run `git pull` in that same folder.
 3. Double-click `start.bat`.
 
 The launcher compares the bundled and installed plugin hashes and updates the plugin only when necessary. It keeps a local backup of a replaced plugin under `data\plugin-backups`.
