@@ -42,7 +42,7 @@ For normal daily use, double-click `start.bat` again. It detects an existing cur
 - Existing BepInEx files are left unchanged after a compatible installation is detected.
 - The plugin observes game state; it does not change gameplay or save state.
 - The server listens only on `127.0.0.1`, so it is not exposed to your network.
-- Local history, scanner settings, catalogs, and extracted icons stay in this project's ignored `data` folder.
+- Local history, scanner settings, and catalogs stay in this project's ignored `data` folder. Referenced icons are extracted locally from the running game into `<game>\BepInEx\PathOfIdleStats\icons`; they are never downloaded or uploaded.
 
 The bundled runtime provenance and fingerprints are recorded in [`vendor/THIRD-PARTY.md`](vendor/THIRD-PARTY.md). BepInEx is the pinned Unity IL2CPP Windows x64 build `6.0.0-be.760+a1afbfb`; Node.js is the pinned Windows x64 runtime `22.22.2`.
 
@@ -80,6 +80,10 @@ Nothing was overwritten. This guard avoids breaking another mod setup. Use the p
 4. Check `<game>\BepInEx\LogOutput.log` for `PathOfIdleStats` or errors.
 
 Plugin changes require a game restart. Starting or stopping only the dashboard does not.
+
+### Icons are missing or broken
+
+Make sure the game is running, enter your save, and select **Refresh heroes** once. The plugin exports referenced icons from the local game on demand. A clean installation intentionally does not include copyrighted game images, so the first request may take a moment while `<game>\BepInEx\PathOfIdleStats\icons` is populated.
 
 ### Port 43127 is already in use
 

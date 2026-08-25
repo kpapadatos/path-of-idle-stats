@@ -34,7 +34,7 @@ Telemetry extraction is read-only with respect to game state. The optional guard
 - `scripts/configure-bepinex.ps1` — disables only BepInEx console output while preserving disk logs.
 - `scripts/restart-game-and-update.ps1` — normal-close/update/reopen workflow with verified window placement, Continue, and three-slot Auto UI clicks.
 - `scripts/uninstall.ps1` — manifest-limited removal/restoration.
-- `scripts/extract-icons.py` — game sprite extraction to content-addressed PNGs.
+- `scripts/extract-icons.py` — optional developer-only bulk game sprite extraction to content-addressed PNGs.
 - `data/` — runtime JSONL, catalogs, and icons; ignored.
 - `work/` — downloads, staging, builds, caches, and backups; ignored.
 
@@ -133,11 +133,11 @@ Get-Content -Tail 100 '<game>\BepInEx\LogOutput.log'
 
 The server binds to loopback, not the LAN.
 
-### 6. Generate icons and catalogs
+### 6. Icons and catalogs
 
-Catalogs are emitted after `TableData.init`. Icons are extracted separately by `scripts/extract-icons.py` into `data/icons.json` and `data/icons/<sha256>.png`.
+Catalogs are emitted after `TableData.init`. The plugin exports referenced sprites on demand into `<game>/BepInEx/PathOfIdleStats/icons`, and the server serves that directory as the authoritative player source. Export uses a temporary GPU render target so it also works for Unity textures that are not CPU-readable; failed jobs remain queued for a later retry. The plugin drains this queue at most one icon every 0.2 seconds to avoid a frame spike, while the dashboard retries initially missing `/assets/icons/` images outside Angular change detection. `scripts/extract-icons.py` is an optional developer-only bulk extractor into `data/icons.json` and `data/icons/<sha256>.png`, which the server uses only as a fallback.
 
-These are derived from the locally installed game, can be large, may be copyrighted, and are not committed. A clean clone must regenerate them locally for icons to appear.
+Icons are derived from the locally installed game, can be large, may be copyrighted, and are not committed. A player install generates only referenced icons automatically at runtime.
 
 ## Runtime architecture
 
@@ -271,7 +271,7 @@ Catalogs cover talents, skills, abilities, materials, runes, tools, curios, and 
 - Angular blank screen with `NG0908`: retain `import 'zone.js';` at the top of `web/src/main.ts`, then rebuild.
 - Dashboard unavailable: confirm `dist/dashboard/browser/index.html`, Node port 43127, and `/api/health`.
 - No telemetry: confirm the plugin DLL, inspect `BepInEx\LogOutput.log`, enter a save, start the server, and request a snapshot.
-- Missing icons: regenerate `data/icons`; a clean clone intentionally has none.
+- Missing icons: confirm the game is running with plugin 0.7.8 or newer and check `<game>/BepInEx/PathOfIdleStats/icons`; the dashboard's ignored `data/icons` cache is only a developer fallback.
 - Place says only `chapter`: build it from English chapter row plus site index, e.g. `Rift-Star Expanse-15`.
 - No selected marker: request a fresh snapshot and verify a basic skill has `selected: true` from `SaveHeroData.baseSkillId`.
 

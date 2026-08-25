@@ -10,9 +10,11 @@ const eventLog = join(dataDirectory, 'events.jsonl');
 const scannerDatabasePath = join(dataDirectory, 'path-of-idle-stats.sqlite');
 const scannerBackupDirectory = join(dataDirectory, 'scanner-state-backups');
 const webRoot = join(root, 'dist', 'dashboard', 'browser');
-const iconRoot = join(root, 'data', 'icons');
 const gameDirectory = process.env.PATH_OF_IDLE_GAME_DIR?.trim() || 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\PathOfIdle';
 const telemetryDirectory = join(gameDirectory, 'BepInEx', 'PathOfIdleStats');
+// Runtime exports are authoritative on player installs. The project data folder
+// remains a fallback for developers who generated a complete offline icon cache.
+const iconRoots = [join(telemetryDirectory, 'icons'), join(root, 'data', 'icons')];
 const requestedPort = Number(process.env.PATH_OF_IDLE_STATS_PORT ?? 43127);
 const port = Number.isInteger(requestedPort) && requestedPort >= 1 && requestedPort <= 65535 ? requestedPort : 43127;
 const snapshotRequest = join(telemetryDirectory, 'snapshot.request');
@@ -207,11 +209,13 @@ const server = createServer(async (request, response) => {
     if (request.method === 'GET' && url.pathname.startsWith('/assets/icons/')) {
       const filename = url.pathname.slice('/assets/icons/'.length);
       if (!/^[a-f0-9]{64}\.png$/.test(filename)) return json(response, 400, { error: 'invalid icon path' });
-      try {
-        const icon = await readFile(join(iconRoot, filename));
-        response.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'public, max-age=86400' });
-        response.end(icon);
-      } catch { return json(response, 404, { error: 'icon not exported yet' }); }
+      let icon = null;
+      for (const iconRoot of iconRoots) {
+        try { icon = await readFile(join(iconRoot, filename)); break; } catch { }
+      }
+      if (!icon) return json(response, 404, { error: 'icon not exported yet' });
+      response.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'public, max-age=86400' });
+      response.end(icon);
       return;
     }
 

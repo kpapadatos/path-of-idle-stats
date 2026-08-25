@@ -803,6 +803,29 @@ class AppComponent implements OnInit, OnDestroy {
   private scannerPersistenceDirty = false;
   private scannerPersistenceSaving = false;
   private destroyed = false;
+  private readonly iconRetryTimers = new Set<number>();
+  private readonly nativeImageError = (event: Event) => {
+    const image = event.target;
+    if (!(image instanceof HTMLImageElement)) return;
+    const url = new URL(image.currentSrc || image.src, window.location.href);
+    if (!url.pathname.startsWith('/assets/icons/')) return;
+    const attempt = Number(image.dataset['iconRetryAttempt'] || 0);
+    if (attempt >= 8) return;
+    image.dataset['iconRetryAttempt'] = String(attempt + 1);
+    const delay = Math.min(8000, 250 * (2 ** attempt));
+    const timer = window.setTimeout(() => {
+      this.iconRetryTimers.delete(timer);
+      if (this.destroyed || !image.isConnected) return;
+      const retryUrl = new URL(image.src, window.location.href);
+      retryUrl.searchParams.set('iconRetry', String(attempt + 1));
+      image.src = retryUrl.toString();
+    }, delay);
+    this.iconRetryTimers.add(timer);
+  };
+  private readonly nativeImageLoad = (event: Event) => {
+    const image = event.target;
+    if (image instanceof HTMLImageElement) delete image.dataset['iconRetryAttempt'];
+  };
   private readonly nativePointerMove = (event: PointerEvent) => {
     if (!this.activeTooltipId || !this.activeTooltipAnchor) return;
     const target = event.target;
@@ -818,7 +841,11 @@ class AppComponent implements OnInit, OnDestroy {
   async ngOnInit() {
     this.restoreCompendiumPreferences();
     await this.initializeScannerServerState();
-    this.zone.runOutsideAngular(() => document.addEventListener('pointermove', this.nativePointerMove, { passive: true }));
+    this.zone.runOutsideAngular(() => {
+      document.addEventListener('pointermove', this.nativePointerMove, { passive: true });
+      document.addEventListener('error', this.nativeImageError, true);
+      document.addEventListener('load', this.nativeImageLoad, true);
+    });
     try {
       const [live, catalogs] = await Promise.all([
         fetch('/api/state').then(response => response.json()),
@@ -865,6 +892,10 @@ class AppComponent implements OnInit, OnDestroy {
     this.stopRecording();
     if (this.pendingSnapshot) { window.clearTimeout(this.pendingSnapshot.timeout); this.pendingSnapshot.resolve(null); this.pendingSnapshot = undefined; }
     document.removeEventListener('pointermove', this.nativePointerMove);
+    document.removeEventListener('error', this.nativeImageError, true);
+    document.removeEventListener('load', this.nativeImageLoad, true);
+    for (const timer of this.iconRetryTimers) window.clearTimeout(timer);
+    this.iconRetryTimers.clear();
     if (this.tooltipFrame) cancelAnimationFrame(this.tooltipFrame);
     if (this.tooltipValidationFrame) cancelAnimationFrame(this.tooltipValidationFrame);
     if (this.scannerPersistenceTimer) window.clearTimeout(this.scannerPersistenceTimer);

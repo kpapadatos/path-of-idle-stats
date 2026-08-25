@@ -23,7 +23,7 @@ public sealed class Plugin : BasePlugin
 {
     public const string PluginGuid = "local.pathofidle.stats";
     public const string PluginName = "Path of Idle Stats";
-    public const string PluginVersion = "0.7.7";
+    public const string PluginVersion = "0.7.8";
 
     private static Plugin? Instance;
     private static readonly object StateLock = new();
@@ -35,6 +35,7 @@ public sealed class Plugin : BasePlugin
     private static bool catalogSent;
     private static float nextSnapshotRequestCheck;
     private static float nextHeartbeat;
+    private static float nextIconExport;
     private static string? lastAutoUiStatus;
     private static string? stableAutoUiSignature;
     private static float stableAutoUiSince;
@@ -73,6 +74,13 @@ public sealed class Plugin : BasePlugin
         {
             nextHeartbeat = now + 2f;
             Instance?.writer?.Enqueue("heartbeat", new { pluginVersion = PluginVersion, mode = "live" });
+        }
+        // Catalogs can reference many sprites at once. Export one at a time on a
+        // small budget so clean installs populate progressively without a frame spike.
+        if (now >= nextIconExport)
+        {
+            nextIconExport = now + 0.2f;
+            ExportPendingIcons(1);
         }
         if (now < nextSnapshotRequestCheck) return;
         nextSnapshotRequestCheck = now + 0.25f;
@@ -1708,39 +1716,69 @@ public sealed class Plugin : BasePlugin
     {
         var directory = Path.Combine(Paths.BepInExRootPath, "PathOfIdleStats", "icons");
         Directory.CreateDirectory(directory);
+        var retry = new List<string>();
         for (var count = 0; count < limit; count++)
         {
-            string key;
-            lock (StateLock) { if (PendingIcons.Count == 0) return; key = PendingIcons.Dequeue(); }
+            string? key = null;
+            lock (StateLock) { if (PendingIcons.Count > 0) key = PendingIcons.Dequeue(); }
+            if (key is null) break;
             var path = Path.Combine(directory, IconFile(key));
             if (File.Exists(path)) continue;
             try
             {
                 var resMgr = ReadStatic("Game", "resMgr");
                 var sprite = resMgr?.GetType().GetMethod("GetSprite")?.Invoke(resMgr, new object[] { key }) as Sprite;
-                if (sprite is null) continue;
-                ExportSprite(sprite, key);
+                if (sprite is null || !ExportSprite(sprite, key)) retry.Add(key);
             }
-            catch (Exception error) { Instance?.Log.LogDebug($"Icon export skipped for {key}: {error.Message}"); }
+            catch (Exception error)
+            {
+                retry.Add(key);
+                Instance?.Log.LogDebug($"Icon export deferred for {key}: {error.Message}");
+            }
         }
+        lock (StateLock) foreach (var key in retry) PendingIcons.Enqueue(key);
     }
 
-    private static void ExportSprite(Sprite sprite, string key)
+    private static bool ExportSprite(Sprite sprite, string key)
     {
         var directory = Path.Combine(Paths.BepInExRootPath, "PathOfIdleStats", "icons");
         Directory.CreateDirectory(directory);
         var path = Path.Combine(directory, IconFile(key));
-        if (File.Exists(path)) return;
+        if (File.Exists(path)) return true;
+        RenderTexture? renderTarget = null;
+        Texture2D? copy = null;
+        var temporaryPath = path + ".tmp";
+        var previousRenderTarget = RenderTexture.active;
         try
         {
             var rect = sprite.textureRect;
-            var pixels = sprite.texture.GetPixels((int)rect.x, (int)rect.y, (int)rect.width, (int)rect.height);
-            var copy = new Texture2D((int)rect.width, (int)rect.height, TextureFormat.RGBA32, false);
-            copy.SetPixels(pixels); copy.Apply();
-            File.WriteAllBytes(path, ImageConversion.EncodeToPNG(copy));
-            UnityEngine.Object.Destroy(copy);
+            var width = Math.Max(1, Mathf.RoundToInt(rect.width));
+            var height = Math.Max(1, Mathf.RoundToInt(rect.height));
+            var source = sprite.texture;
+            renderTarget = RenderTexture.GetTemporary(width, height, 0, RenderTextureFormat.ARGB32);
+            var scale = new Vector2(rect.width / source.width, rect.height / source.height);
+            var offset = new Vector2(rect.x / source.width, rect.y / source.height);
+            Graphics.Blit(source, renderTarget, scale, offset);
+            RenderTexture.active = renderTarget;
+            copy = new Texture2D(width, height, TextureFormat.RGBA32, false);
+            copy.ReadPixels(new Rect(0, 0, width, height), 0, 0, false);
+            copy.Apply(false, false);
+            File.WriteAllBytes(temporaryPath, ImageConversion.EncodeToPNG(copy));
+            File.Move(temporaryPath, path);
+            return true;
         }
-        catch (Exception error) { Instance?.Log.LogDebug($"Runtime sprite export skipped for {key}: {error.Message}"); }
+        catch (Exception error)
+        {
+            Instance?.Log.LogDebug($"Runtime sprite export deferred for {key}: {error.Message}");
+            return false;
+        }
+        finally
+        {
+            RenderTexture.active = previousRenderTarget;
+            if (copy is not null) UnityEngine.Object.Destroy(copy);
+            if (renderTarget is not null) RenderTexture.ReleaseTemporary(renderTarget);
+            try { if (File.Exists(temporaryPath)) File.Delete(temporaryPath); } catch { }
+        }
     }
 
     private static IEnumerable<object> ReadValues(object? collection)
