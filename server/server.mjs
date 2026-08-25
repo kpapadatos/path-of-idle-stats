@@ -21,11 +21,16 @@ const snapshotRequest = join(telemetryDirectory, 'snapshot.request');
 const catalogRequest = join(telemetryDirectory, 'catalog.request');
 const codexRequest = join(telemetryDirectory, 'codex.request');
 const inventoryRequest = join(telemetryDirectory, 'inventory.request');
+const iconProgressFile = join(telemetryDirectory, 'icons.progress.json');
 const clients = new Set();
-const state = { connected: false, gameRunning: false, updatedAt: null, snapshotUpdatedAt: null, inventoryUpdatedAt: null, inventoryItemAdded: null, heroes: [], slots: [], resources: [], sanctum: null, inventory: [], battles: [], events: [], catalogs: {} };
+const state = { connected: false, gameRunning: false, updatedAt: null, snapshotUpdatedAt: null, inventoryUpdatedAt: null, inventoryItemAdded: null, iconProgress: null, heroes: [], slots: [], resources: [], sanctum: null, inventory: [], battles: [], events: [], catalogs: {} };
 let codexSnapshot = { updatedAt: null, items: [], affixPools: [], rarities: [] };
 let lastGameHeartbeat = 0;
 await mkdir(dataDirectory, { recursive: true });
+try {
+  const savedIconProgress = JSON.parse(await readFile(iconProgressFile, 'utf8'));
+  if (Number.isInteger(savedIconProgress?.total) && Number.isInteger(savedIconProgress?.completed)) state.iconProgress = savedIconProgress;
+} catch { }
 const scannerDatabase = new DatabaseSync(scannerDatabasePath);
 scannerDatabase.exec(`
   PRAGMA journal_mode = WAL;
@@ -81,7 +86,8 @@ function applyEvent(event) {
     state.events.unshift(event);
     state.events = state.events.slice(0, 100);
   }
-  if (event.type.startsWith('snapshot.')) state.snapshotUpdatedAt = event.timestamp;
+  if (event.type.startsWith('snapshot.') && event.type !== 'snapshot.icon-progress') state.snapshotUpdatedAt = event.timestamp;
+  if (event.type === 'snapshot.icon-progress') state.iconProgress = event.payload ?? null;
   if (event.type === 'snapshot.heroes') state.heroes = event.payload?.heroes ?? event.payload ?? [];
   if (event.type === 'snapshot.slots') state.slots = event.payload?.slots ?? [];
   if (event.type === 'snapshot.resources') {

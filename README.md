@@ -83,7 +83,7 @@ Plugin changes require a game restart. Starting or stopping only the dashboard d
 
 ### Icons are missing or broken
 
-Make sure the game is running, enter your save, and select **Refresh heroes** once. The plugin exports referenced icons from the local game on demand. A clean installation intentionally does not include copyrighted game images, so the first request may take a moment while `<game>\BepInEx\PathOfIdleStats\icons` is populated.
+Make sure the game is running and enter your save. A clean installation intentionally does not include copyrighted game images, so the dashboard first shows a centered **Loading...** progress bar while the plugin exports the dynamically discovered icon set from the local game. Existing cached icons count immediately, missing icons export at approximately 50 per second, and the dashboard appears when the queue is complete. The cache under `<game>\BepInEx\PathOfIdleStats\icons` is reused on later launches.
 
 ### Port 43127 is already in use
 

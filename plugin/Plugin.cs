@@ -23,7 +23,7 @@ public sealed class Plugin : BasePlugin
 {
     public const string PluginGuid = "local.pathofidle.stats";
     public const string PluginName = "Path of Idle Stats";
-    public const string PluginVersion = "0.7.8";
+    public const string PluginVersion = "0.7.9";
 
     private static Plugin? Instance;
     private static readonly object StateLock = new();
@@ -65,7 +65,11 @@ public sealed class Plugin : BasePlugin
         Log.LogInfo($"{PluginName} {PluginVersion} loaded with read-only telemetry hooks.");
     }
 
-    private static void TableReadyPostfix() => SafeHook("table-ready", () => EmitCatalogs());
+    private static void TableReadyPostfix() => SafeHook("table-ready", () =>
+    {
+        EmitCatalogs();
+        ReportIconProgress(true);
+    });
 
     private static void RootUpdatePostfix() => SafeHook("snapshot-request", () =>
     {
@@ -75,12 +79,16 @@ public sealed class Plugin : BasePlugin
             nextHeartbeat = now + 2f;
             Instance?.writer?.Enqueue("heartbeat", new { pluginVersion = PluginVersion, mode = "live" });
         }
-        // Catalogs can reference many sprites at once. Export one at a time on a
-        // small budget so clean installs populate progressively without a frame spike.
+        // Keep a 50 icons/second budget. A small catch-up batch preserves the rate
+        // below 50 FPS without allowing a large one-frame export spike.
+        if (nextIconExport <= 0f) nextIconExport = now;
         if (now >= nextIconExport)
         {
-            nextIconExport = now + 0.2f;
-            ExportPendingIcons(1);
+            var exportCount = Math.Min(3, 1 + Mathf.FloorToInt((now - nextIconExport) / 0.02f));
+            nextIconExport += exportCount * 0.02f;
+            if (nextIconExport < now - 0.06f) nextIconExport = now + 0.02f;
+            ExportPendingIcons(exportCount);
+            ReportIconProgress();
         }
         if (now < nextSnapshotRequestCheck) return;
         nextSnapshotRequestCheck = now + 0.25f;
@@ -97,7 +105,7 @@ public sealed class Plugin : BasePlugin
         {
             File.Delete(catalogRequestPath);
             EmitCatalogs(true);
-            ExportPendingIcons(256);
+            ReportIconProgress(true);
         }
 
         var snapshotRequestPath = Path.Combine(telemetryDirectory, "snapshot.request");
@@ -364,7 +372,7 @@ public sealed class Plugin : BasePlugin
             return new { battleIndex = index, heroes };
         }).ToList();
         var allHeroes = slots.SelectMany(slot => slot.heroes).ToList();
-        ExportPendingIcons(32);
+        ReportIconProgress(true);
         Instance?.writer?.Enqueue("snapshot.slots", new { slots });
         Instance?.writer?.Enqueue("snapshot.heroes", new { heroes = allHeroes });
         Instance?.writer?.Enqueue("snapshot.resources", new { resources = DescribePrimaryResources(), sanctum = DescribeSanctum() });
@@ -473,7 +481,7 @@ public sealed class Plugin : BasePlugin
             .ThenBy(item => Convert.ToInt32(item["sortIndex"], CultureInfo.InvariantCulture))
             .ThenBy(item => Convert.ToInt32(item["id"], CultureInfo.InvariantCulture))
             .ToList();
-        ExportPendingIcons(768);
+        ReportIconProgress(true);
         Instance?.writer?.Enqueue("snapshot.codex", new
         {
             items = itemEntries,
@@ -562,7 +570,7 @@ public sealed class Plugin : BasePlugin
                 }
             }
         }
-        ExportPendingIcons(256);
+        ReportIconProgress(true);
         Instance?.writer?.Enqueue("snapshot.inventory", new { source = "all-storage", items });
     }
 
@@ -574,7 +582,7 @@ public sealed class Plugin : BasePlugin
         var item = DescribeItem(__0);
         item["storageLocation"] = "inventory";
         item["inventoryIndex"] = ReadNullableInt(__0, "fieldIndex");
-        ExportPendingIcons(16);
+        ReportIconProgress(true);
         Instance?.writer?.Enqueue("inventory.item-added", new { item });
     });
 
@@ -888,7 +896,7 @@ public sealed class Plugin : BasePlugin
                     Math.Max(0, (DateTimeOffset.UtcNow - capture.StartedAt).TotalSeconds), capture);
             }).ToList();
         EmitCatalogs();
-        ExportPendingIcons(24);
+        ReportIconProgress(true);
         var endedAt = DateTimeOffset.UtcNow;
         Instance?.writer?.Enqueue("battle.ended", new
         {
@@ -1706,11 +1714,50 @@ public sealed class Plugin : BasePlugin
     private static void QueueIcon(string? key)
     {
         if (string.IsNullOrWhiteSpace(key)) return;
-        lock (StateLock) if (KnownIcons.Add(key)) PendingIcons.Enqueue(key);
+        lock (StateLock)
+        {
+            if (!KnownIcons.Add(key)) return;
+            var path = Path.Combine(Paths.BepInExRootPath, "PathOfIdleStats", "icons", IconFile(key));
+            if (!File.Exists(path)) PendingIcons.Enqueue(key);
+        }
     }
 
     private static string? IconUrl(string? key) => string.IsNullOrWhiteSpace(key) ? null : "/assets/icons/" + IconFile(key);
     private static string IconFile(string key) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key))).ToLowerInvariant() + ".png";
+
+    private static int lastReportedIconTotal = -1;
+    private static int lastReportedIconCompleted = -1;
+    private static float nextIconProgressReport;
+
+    private static void ReportIconProgress(bool force = false)
+    {
+        var now = Time.realtimeSinceStartup;
+        if (!force && now < nextIconProgressReport) return;
+        nextIconProgressReport = now + 0.2f;
+        int total;
+        int pending;
+        lock (StateLock)
+        {
+            total = KnownIcons.Count;
+            pending = PendingIcons.Count;
+        }
+        var completed = Math.Max(0, total - pending);
+        if (!force && total == lastReportedIconTotal && completed == lastReportedIconCompleted) return;
+        lastReportedIconTotal = total;
+        lastReportedIconCompleted = completed;
+        var progress = new { total, completed, pending, complete = catalogSent && total > 0 && pending == 0 };
+        Instance?.writer?.Enqueue("snapshot.icon-progress", progress);
+        try
+        {
+            var directory = Path.Combine(Paths.BepInExRootPath, "PathOfIdleStats");
+            Directory.CreateDirectory(directory);
+            var path = Path.Combine(directory, "icons.progress.json");
+            var temporaryPath = path + ".tmp";
+            File.WriteAllText(temporaryPath, JsonSerializer.Serialize(progress));
+            File.Move(temporaryPath, path, true);
+        }
+        catch (Exception error) { Instance?.Log.LogDebug($"Icon progress persistence skipped: {error.Message}"); }
+    }
 
     private static void ExportPendingIcons(int limit)
     {

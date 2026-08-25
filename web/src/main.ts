@@ -11,6 +11,7 @@ type ScannerFilter = { id: string; title: string; groupId: string | null; enable
 type ScannerFilterGroup = { id: string; title: string; collapsed: boolean };
 type ScannerPersistedState = { schemaVersion: number; filters: ScannerFilter[]; groups: ScannerFilterGroup[]; autoEnabled: boolean };
 type ScannerMatch = any & { _matchedFilterIds: string[] };
+type IconProgress = { total: number; completed: number; pending: number; complete: boolean };
 type TelemetryState = {
   connected: boolean;
   gameRunning: boolean;
@@ -18,6 +19,7 @@ type TelemetryState = {
   snapshotUpdatedAt?: string | null;
   inventoryUpdatedAt?: string | null;
   inventoryItemAdded?: TelemetryEvent | null;
+  iconProgress?: IconProgress | null;
   heroes: unknown[];
   slots: Array<{ battleIndex: number; heroes: unknown[] }>;
   resources: unknown[];
@@ -34,6 +36,16 @@ type TelemetryState = {
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [CommonModule],
   template: `
+    <div *ngIf="showIconLoader(); else dashboard" class="flex h-dvh items-center justify-center bg-zinc-950 px-6" role="status" aria-live="polite">
+      <section class="w-full max-w-sm text-center">
+        <p class="text-xl font-medium tracking-tight text-zinc-100">Loading...</p>
+        <div class="mt-5 h-2 overflow-hidden rounded-full border border-zinc-800 bg-zinc-900 shadow-inner shadow-black/40">
+          <div class="h-full rounded-full bg-gradient-to-r from-amber-600 via-amber-400 to-yellow-300 transition-[width] duration-200 ease-out" [style.width.%]="iconLoadingPercent()"></div>
+        </div>
+        <p class="mt-3 font-mono text-sm tabular-nums text-zinc-500">{{ iconLoadingCompleted() }} / {{ iconLoadingTotal() || '…' }}</p>
+      </section>
+    </div>
+    <ng-template #dashboard>
     <main class="mx-auto flex h-dvh max-w-7xl flex-col overflow-hidden p-3 md:p-5">
       <header class="mb-4 flex shrink-0 flex-wrap items-end justify-between gap-3">
         <div>
@@ -600,6 +612,7 @@ type TelemetryState = {
       </div>
 
     </main>
+    </ng-template>
   `
 })
 class AppComponent implements OnInit, OnDestroy {
@@ -782,7 +795,12 @@ class AppComponent implements OnInit, OnDestroy {
     const entries = this.currentDamageDone()?.entries;
     return Array.isArray(entries) ? entries : [];
   });
-  readonly state = signal<TelemetryState>({ connected: false, gameRunning: false, updatedAt: null, heroes: [], slots: [], resources: [], sanctum: null, inventory: [], battles: [], events: [], catalogs: {} });
+  readonly state = signal<TelemetryState>({ connected: false, gameRunning: false, updatedAt: null, iconProgress: null, heroes: [], slots: [], resources: [], sanctum: null, inventory: [], battles: [], events: [], catalogs: {} });
+  readonly iconLoadingFinished = signal(false);
+  readonly showIconLoader = computed(() => !this.iconLoadingFinished());
+  readonly iconLoadingTotal = computed(() => Math.max(0, Number(this.state().iconProgress?.total) || 0));
+  readonly iconLoadingCompleted = computed(() => Math.min(this.iconLoadingTotal(), Math.max(0, Number(this.state().iconProgress?.completed) || 0)));
+  readonly iconLoadingPercent = computed(() => this.iconLoadingTotal() > 0 ? (this.iconLoadingCompleted() / this.iconLoadingTotal()) * 100 : 0);
   readonly status = signal('Connecting');
   private stream?: EventSource;
   private recordingTimer?: number;
@@ -853,6 +871,7 @@ class AppComponent implements OnInit, OnDestroy {
       ]);
       this.catalogs.set(catalogs);
       this.state.set({ ...live, catalogs });
+      if (live.iconProgress?.complete && Number(live.iconProgress?.total) > 0) this.iconLoadingFinished.set(true);
       this.lastInventoryItemAddedTimestamp = live.inventoryItemAdded?.timestamp || null;
       if (live.gameRunning) void this.refreshTalentCatalogIfNeeded();
     } catch { /* server stream will retry */ }
@@ -863,6 +882,7 @@ class AppComponent implements OnInit, OnDestroy {
       const previousSnapshotTimestamp = this.latestSlotSnapshotTimestamp(this.state());
       const next = { ...this.state(), ...JSON.parse(event.data), catalogs: this.catalogs() } as TelemetryState;
       this.state.set(next);
+      if (next.iconProgress?.complete && Number(next.iconProgress?.total) > 0) this.iconLoadingFinished.set(true);
       this.handleInventoryItemAdded(next.inventoryItemAdded || null);
       if (next.gameRunning) void this.refreshTalentCatalogIfNeeded();
       this.scheduleTooltipAnchorValidation();
