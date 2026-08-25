@@ -9,6 +9,7 @@ using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using BepInEx;
@@ -23,7 +24,7 @@ public sealed class Plugin : BasePlugin
 {
     public const string PluginGuid = "local.pathofidle.stats";
     public const string PluginName = "Path of Idle Stats";
-    public const string PluginVersion = "0.10.1";
+    public const string PluginVersion = "0.10.2";
 
     private static Plugin? Instance;
     private static readonly object StateLock = new();
@@ -488,7 +489,7 @@ public sealed class Plugin : BasePlugin
             capture.AddTimelineSnapshot(
                 heroUniqueId.Value,
                 elapsedSeconds,
-                DescribeCompactStats(Read(combat, "attrData")),
+                DescribeCompactStats(Read(combat, "attrData"), hero, ReadNullableInt(save, "level")),
                 TryDescribeCombatEffects(combat, displayedEffectBars),
                 TryDescribeDamageDone(hero, tallyData, observedBattleTime, capture));
         }
@@ -497,7 +498,7 @@ public sealed class Plugin : BasePlugin
         capture.RecordTimelineCaptureDuration(captureTimer.Elapsed.TotalMilliseconds);
     }
 
-    private static List<object?[]> DescribeCompactStats(object? attrData)
+    private static List<object?[]> DescribeCompactStats(object? attrData, object hero, int? level)
     {
         var output = new List<object?[]>();
         if (attrData is null) return output;
@@ -508,10 +509,51 @@ public sealed class Plugin : BasePlugin
         {
             var value = Convert.ToSingle(getter.Invoke(attrData, new[] { enumValue }), CultureInfo.InvariantCulture);
             if (Math.Abs(value) <= 0.00001f) continue;
-            output.Add(new object?[] { Convert.ToInt32(enumValue, CultureInfo.InvariantCulture), value });
+            var id = Convert.ToInt32(enumValue, CultureInfo.InvariantCulture);
+            var row = InvokeStatic("TableData", "getTAttrData", id);
+            var localizedTemplate = ReadString(row, "des");
+            string[]? explanationArguments = null;
+            if (!string.IsNullOrWhiteSpace(localizedTemplate) && Regex.IsMatch(localizedTemplate, @"\{\d+(?:[^}]*)\}"))
+            {
+                var info = InvokeStaticArgs("AttrInfoData", "Create", id, value, attrData, level ?? 1, true, true, true);
+                if (info is not null) info.GetType().GetMethod("SetOwnHeroData")?.Invoke(info, new[] { hero });
+                explanationArguments = ExtractFormatArguments(localizedTemplate, info is null ? null : InvokeString(info, "GetExplain"));
+            }
+            output.Add(explanationArguments is { Length: > 0 }
+                ? new object?[] { id, value, explanationArguments }
+                : new object?[] { id, value });
         }
         catch { }
         return output;
+    }
+
+    private static string[]? ExtractFormatArguments(string template, string? rendered)
+    {
+        if (string.IsNullOrWhiteSpace(rendered)) return null;
+        var placeholders = Regex.Matches(template, @"\{(\d+)(?:[^}]*)\}");
+        if (placeholders.Count == 0) return null;
+        var maximumIndex = placeholders.Cast<Match>().Max(match => int.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture));
+        var seen = new HashSet<int>();
+        var pattern = new StringBuilder("^");
+        var cursor = 0;
+        foreach (Match placeholder in placeholders)
+        {
+            pattern.Append(Regex.Escape(template.Substring(cursor, placeholder.Index - cursor)));
+            var index = int.Parse(placeholder.Groups[1].Value, CultureInfo.InvariantCulture);
+            pattern.Append(seen.Add(index) ? $"(?<arg{index}>.*?)" : $"\\k<arg{index}>");
+            cursor = placeholder.Index + placeholder.Length;
+        }
+        pattern.Append(Regex.Escape(template.Substring(cursor))).Append('$');
+        var match = Regex.Match(rendered, pattern.ToString(), RegexOptions.Singleline | RegexOptions.CultureInvariant);
+        if (!match.Success) return null;
+        var arguments = new string[maximumIndex + 1];
+        for (var index = 0; index <= maximumIndex; index++)
+        {
+            var group = match.Groups[$"arg{index}"];
+            if (!group.Success) return null;
+            arguments[index] = group.Value;
+        }
+        return arguments;
     }
 
     private static void EmitCodexSnapshot()

@@ -628,7 +628,7 @@ class BattleHeroDpsComponent {
             <p class="font-medium text-amber-200">{{ $any(stat).englishName || $any(stat).name || $any(stat).key }}</p>
             <p class="mt-1 font-mono text-sm text-zinc-100">{{ statValue($any(stat)) }}</p>
             <p *ngIf="$any(stat).englishDescription || $any(stat).description" class="mt-2 text-xs leading-relaxed text-zinc-300">{{ $any(stat).englishDescription || $any(stat).description }}</p>
-            <p *ngIf="$any(stat).explanation || $any(stat).specialDescription" class="mt-2 border-t border-zinc-800 pt-2 text-xs leading-relaxed text-zinc-400">{{ $any(stat).explanation || $any(stat).specialDescription }}</p>
+            <p *ngIf="statExplanation($any(stat)) as explanation" class="mt-2 border-t border-zinc-800 pt-2 text-xs leading-relaxed text-zinc-400">{{ explanation }}</p>
             <p class="mt-2 text-[10px] text-zinc-600">Internal: {{ $any(stat).key }} · ID {{ $any(stat).id }}</p>
           </div>
           <div id="effect-tooltip" *ngIf="hoveredEffect() as effect" class="pointer-events-none fixed left-0 top-0 z-[70] w-80 rounded-xl border border-zinc-700 bg-zinc-950 p-3 text-left shadow-2xl will-change-transform">
@@ -1908,6 +1908,18 @@ class AppComponent implements OnInit, OnDestroy {
     const formatted = value.toLocaleString('en-US', { maximumFractionDigits: 3 });
     return Number(stat?.valueType) === 2 ? formatted + '%' : formatted;
   }
+  statExplanation(stat: any): string {
+    const gameExplanation = String(stat?.explanation || stat?.specialDescription || '').trim();
+    if (gameExplanation) return gameExplanation;
+    const template = String(stat?.englishDescription || stat?.description || '').trim();
+    const args = Array.isArray(stat?.explanationArguments) ? stat.explanationArguments : [];
+    if (!template || !args.length) return '';
+    const resolved = template.replace(/\{(\d+)(?:[^}]*)\}/g, (placeholder, rawIndex) => {
+      const value = args[Number(rawIndex)];
+      return value === undefined || value === null ? placeholder : String(value);
+    });
+    return /\{\d+(?:[^}]*)\}/.test(resolved) ? '' : resolved;
+  }
   statListValue(stat: any): string {
     const value = Number(stat?.value);
     if (!Number.isFinite(value)) return String(stat?.value ?? '—');
@@ -2134,9 +2146,10 @@ class AppComponent implements OnInit, OnDestroy {
       const stats = (Array.isArray(snapshot?.stats) ? snapshot.stats : []).map((compact: any) => {
         const id = Array.isArray(compact) ? compact[0] : compact?.id;
         const value = Array.isArray(compact) ? compact[1] : compact?.value;
+        const explanationArguments = Array.isArray(compact) ? compact[2] : compact?.explanationArguments;
         const definition = statDefinitions.get(String(id)) || { id, key: `Stat ${id}`, englishName: `Stat ${id}` };
         const { displayValue: _displayValue, specialDescription: _specialDescription, explanation: _explanation, ...stableDefinition } = definition;
-        return { ...stableDefinition, id, value };
+        return { ...stableDefinition, id, value, explanationArguments };
       });
       const effects = (Array.isArray(snapshot?.effects) ? snapshot.effects : []).map((compact: any) => ({
         ...(effectDefinitions[Number(compact?.[0])] || {}),
