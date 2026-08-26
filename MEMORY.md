@@ -1,312 +1,556 @@
-# Path of Idle Stats
+# Path of Idle Stats — maintainer memory
 
-Local-only telemetry, data-mining, and dashboard tooling for **Path of Idle: Old Gods Rising**. This is the project handoff and source of truth for continuing from a clean checkout.
+This is the durable handoff for continuing the project from a clean checkout. It captures the project-relevant knowledge, decisions, mistakes, safety constraints, and user preferences accumulated during development. It intentionally does not reproduce private platform/system prompts verbatim.
 
-## Goal and current result
+Current baseline at the time of this update:
 
-A BepInEx 6 IL2CPP plugin observes the running Unity game and POSTs JSON telemetry to a local Node.js service. An Angular/Tailwind dashboard at `http://127.0.0.1:43127/` displays the three concurrent battle slots, ordered heroes, battle history, loot, classes, levels, talent trees, skills, English names, icons, and the selected basic skill.
+- Public repository: [https://github.com/kpapadatos/path-of-idle-stats](https://github.com/kpapadatos/path-of-idle-stats)
+- Branch: `main`
+- Released version: `v0.10.2`
+- Release commit: `34ae4b6`
+- Local project path used during development: `C:\r\path-of-idle-stats`
+- Default Steam game path on the original machine: `C:\Program Files (x86)\Steam\steamapps\common\PathOfIdle`
+- Dashboard: [http://127.0.0.1:43127](http://127.0.0.1:43127)
 
-Telemetry extraction is read-only with respect to game state. The optional guarded restart script uses the game's real Continue button and visible Auto checkboxes to resume the three battle slots; it never locates, reads, edits, or replaces save files.
+## Product and goal
 
-## Safety boundaries
+Path of Idle Stats is a local companion for **Path of Idle: Old Gods Rising**. A BepInEx 6 IL2CPP plugin reads live Unity runtime objects, sends telemetry to a loopback-only Node server, and an Angular/Tailwind dashboard presents:
 
-- Never modify, delete, move, or inspect game save files.
-- Close `PathOfIdle.exe` before installing, updating, or uninstalling the plugin.
-- Only install BepInEx files and `BepInEx\plugins\PathOfIdleStats.dll` into the game directory.
-- Stage downloads and builds under this project before installation.
-- `scripts/install.ps1` validates the executable, refuses to run while the game is open, backs up collisions, and records every installed file in `install-manifest.json`.
-- `scripts/update-plugin.ps1` only replaces the manifest-recorded plugin and backs up the previous DLL by SHA-256.
-- `scripts/uninstall.ps1` removes only manifest-recorded files and restores backed-up collisions.
-- The plugin and server communicate only over `http://127.0.0.1:43127`.
-- Never commit `data/`, `work/`, `install-manifest.json`, logs, or extracted game assets. The pinned player runtime under `vendor/`, compiled plugin under `release/`, and production dashboard under `dist/dashboard/browser/` are intentionally committed for one-step installation.
+- the three concurrent battle slots and ordered heroes;
+- retained battle history, finalized loot, per-hero final DPS, and loot/hour;
+- Gold, Blood, Bone, Sanctum floor, and Sanctum resource bonus;
+- hero talents, skills, live/base stats, buffs/debuffs, and damage meters;
+- one-second live and historical combat timelines;
+- a searchable, rank-scaled talent compendium;
+- the game Codex with awareness and possible/excluded rank-9 affixes;
+- an inventory/warehouse/vault item scanner with persistent filters and groups.
+
+Everything is local. The plugin is observational except for the explicitly guarded restart automation, which invokes real game UI handlers for Continue and Auto. It must never edit save files or directly mutate gameplay/save state.
+
+## Working relationship and user expectations
+
+The user does not want to learn or operate BepInEx internals; handle the workflow end to end. They are technically discerning about architecture and UX and expect evidence, not guesses.
+
+- Protect the game, save, filters, history, and the rest of the computer above all else.
+- Never inspect, edit, copy, move, or delete save files on disk. Runtime objects named `Save*` may be read in memory; that is not permission to touch save files.
+- Be autonomous. If a safe script already closes/updates/reopens the game, use it instead of repeatedly asking the user to do manual restarts.
+- Give short progress updates during tool work; do not leave the user waiting without explanation. Trivial filesystem checks should finish in seconds.
+- Verify runtime fields against values visible in the game before shipping a mapping. A field with a plausible name is not sufficient.
+- Do not claim something is fixed merely because it compiles. Build, install when appropriate, inspect logs/API state, and let the user test behavior that needs real gameplay.
+- Preserve existing user data before migrations. The loss of a carefully built scanner filter is unacceptable.
+- Avoid regressions in unrelated features. When changing shared state, SSE reconciliation, tooltips, or hero payloads, explicitly test adjacent behavior.
+- The user prefers clean, robust architecture and notices flicker, delayed updates, stale data, random identity swaps, and unnecessary polling immediately.
+- Do not commit or push unless the user explicitly asks.
+- Standing release rule: when the user says **commit and push**, increment the patch version and create/push an annotated `v<version>` tag unless they explicitly say otherwise. Never move or reuse a tag.
+- Updates must overwrite the existing project folder rather than use a new folder; otherwise ignored local data such as scanner filters/history is lost.
+
+## Non-negotiable engineering rules
+
+### Runtime identity and IL2CPP pointers
+
+Unity/IL2CPP native pointers are transient and may be reused after an object is removed. Earlier long-lived pointer caches caused effect titles/icons/descriptions to become apparently random over time, and incorrect joins caused swapped talent identities.
+
+- Never persist a native pointer, expose it as durable identity, or use it across battles/object lifetimes.
+- Never use a pointer-address cache as a catalog or provenance database.
+- If a pointer is unavoidable inside one active runtime lifecycle, scope it to that exact instance, clear it on the matching removal/battle reset, and immediately resolve durable IDs and provenance.
+- Durable identities use game definition IDs, hero unique IDs, battle IDs, item rarity+definition ID, affix IDs, and explicit source fields.
+- Resolve an entity's title, description, icon, rank, and ID from the same definition/runtime object. Do not zip unrelated lists or assume reflection/dictionary enumeration order.
+- Never join collections by array index unless the game type explicitly guarantees that structure.
+
+### Angular and live updates
+
+- Every Angular component uses `ChangeDetectionStrategy.OnPush`.
+- Use signals/computed state, immutable updates, stable `trackBy` keys, and reference reuse for unchanged battles/heroes.
+- Do not rebuild the 50×3 retained history on every heartbeat or snapshot. Hovered rows and tooltips must not flicker when unrelated telemetry arrives.
+- Heartbeats update liveness without broadcasting a full state when presence did not change.
+- Expensive/high-frequency work must live outside Angular's zone when possible.
+- Never attach a tooltip inside an overflow-clipped container. Tooltips are fixed, document-level, `pointer-events: none`, viewport-aware, and cleared on true pointer leave, document leave, blur, modal close, or anchor removal.
+- Changing a timeline point must update or close the tooltip deterministically; never leave a tooltip bound to stale effect DOM/data.
+- Browser tabs must consume backend-owned state. Multiple open tabs must not cause multiple game scans, polling loops, or timeline collectors.
+
+### Persistence and file growth
+
+- Never use an ever-growing append-only file as primary state.
+- Battle history is capped at 50 entries per slot. Its timeline is deleted when the owning battle is reset or evicted.
+- Historical timelines are compressed before SQLite storage.
+- Scanner filters/groups live in a single SQLite row containing the complete JSON state.
+- SQLite writes and pruning must be transactional.
+- Do not persist heartbeats, full snapshots, repeated catalogs, or high-volume inventory events.
+- Known debt: the server and plugin still have low-volume `events.jsonl` fallback/diagnostic paths. Never add high-volume event types to them; if this area is touched, add explicit size retention/rotation or remove the fallback. Completed battles, snapshots, heartbeats, and automatic scanner item events must not be appended there.
+
+### Game safety and installation
+
+- The game must be closed before replacing BepInEx/plugin DLLs.
+- Close it normally with `CloseMainWindow()`; never force-kill it during an update.
+- Validate the exact game executable and Steam manifest before touching the game directory.
+- Only install the pinned BepInEx distribution and `BepInEx\plugins\PathOfIdleStats.dll`.
+- Installation/removal is manifest-limited and hash-verified. Preserve backups of collisions/replaced plugin DLLs.
+- Never recursively delete or overwrite broad game/project directories.
+- BepInEx console output is disabled through its configuration; disk logging remains available in `BepInEx\LogOutput.log`.
+- Plugin hooks must fail safely and must not block Unity's main thread on network I/O.
 
 ## Repository layout
 
-- `plugin/Plugin.cs` — BepInEx plugin and reflection-based extraction.
+- `plugin/Plugin.cs` — BepInEx plugin, Harmony hooks, reflection extraction, localization, icon export, timelines, scanner, restart UI handshake.
 - `plugin/PathOfIdleStats.csproj` — .NET 6 metadata.
-- `server/server.mjs` — dependency-free Node ingestion/API/static server.
-- `web/src/main.ts` — standalone Angular dashboard and UI.
-- `scripts/build-plugin.ps1` — Roslyn compilation against BepInEx and game interop.
-- `scripts/install.ps1` — guarded first installation.
-- `scripts/find-game.ps1` — detects Steam and its custom libraries, then verifies app `4243990` and the game layout.
-- `scripts/start.ps1` / `start.bat` — idempotent install/update, bundled server startup, readiness check, and browser opening.
-- `scripts/update-plugin.ps1` — guarded plugin-only replacement.
-- `scripts/configure-bepinex.ps1` — disables only BepInEx console output while preserving disk logs.
-- `scripts/restart-game-and-update.ps1` — normal-close/update/reopen workflow with verified window placement, Continue, and three-slot Auto UI clicks.
-- `scripts/uninstall.ps1` — manifest-limited removal/restoration.
-- `scripts/extract-icons.py` — optional developer-only bulk game sprite extraction to content-addressed PNGs.
-- `data/` — runtime JSONL, catalogs, and icons; ignored.
-- `work/` — downloads, staging, builds, caches, and backups; ignored.
+- `server/server.mjs` — dependency-free Node HTTP/SSE server, request correlation, scanner orchestration, SQLite persistence, static files.
+- `web/src/main.ts` — standalone Angular dashboard. It currently contains the root component and isolated OnPush historical-DPS child.
+- `dist/dashboard/browser/` — committed production Angular build used by players.
+- `release/PathOfIdleStats.dll` — committed release plugin.
+- `vendor/bepinex/` — pinned player BepInEx runtime.
+- `vendor/node/` — pinned Windows x64 Node runtime.
+- `scripts/find-game.ps1` — Steam registry/library discovery and app/layout verification.
+- `scripts/start.ps1`, `start.bat` — one-step install/update, server startup, health wait, browser opening.
+- `scripts/build-plugin.ps1` — Roslyn build against BepInEx/game interop.
+- `scripts/install.ps1` — guarded initial installation.
+- `scripts/update-plugin.ps1` — guarded hash-backed plugin replacement.
+- `scripts/configure-bepinex.ps1` — hides BepInEx console while retaining logs.
+- `scripts/restart-game-and-update.ps1` — normal close, build/update, Steam launch, right-half placement, Continue, Auto.
+- `scripts/uninstall.ps1` — manifest-limited uninstall/restoration.
+- `scripts/extract-icons.py` — developer-only bulk icon extraction fallback.
+- `data/` — ignored SQLite, runtime state, catalogs, backups, optional developer icons.
+- `work/` — ignored downloads, decompilation, staging, experiments, and temporary diagnostics.
+- `docs/images/` — committed README screenshots.
 
-## Known working environment
+Ignored/private runtime data includes `data/`, `work/`, `node_modules/`, build caches, `install-manifest.json`, logs, SQLite sidecars, `.env*`, and editor files. Do not commit locally extracted game assets, tokens, usernames, telemetry, or machine-specific installation records.
 
-- Windows x64.
-- Steam game path: `C:\Program Files (x86)\Steam\steamapps\common\PathOfIdle`.
-- BepInEx archive: `BepInEx-Unity.IL2CPP-win-x64-6.0.0-be.760+a1afbfb.zip`.
-- Archive SHA-256: `9753B825578A3C3A31CC10067CD45A44A7BF56D3C34C4679E24D6ADFD0FBA8EA`.
+## Runtime/provenance baseline
+
+- Windows x64; Steam app ID `4243990`.
+- BepInEx: `BepInEx-Unity.IL2CPP-win-x64-6.0.0-be.760+a1afbfb.zip`.
+- BepInEx SHA-256: `9753B825578A3C3A31CC10067CD45A44A7BF56D3C34C4679E24D6ADFD0FBA8EA`.
+- Node runtime: Windows x64 `22.22.2`.
+- Node archive SHA-256: `7C93E9D92BF68C07182B471AA187E35EE6CD08EF0F24AB060DFFF605FCC1C57C`.
 - Plugin target: .NET 6.
-- The custom compiler script discovers Roslyn from the newest installed .NET SDK.
-- Node build dependencies are locked by `pnpm-lock.yaml`. They are not needed at runtime: the server uses Node built-ins and the Angular production build is committed.
-- Bundled Node runtime: Windows x64 `22.22.2`; archive SHA-256 `7C93E9D92BF68C07182B471AA187E35EE6CD08EF0F24AB060DFFF605FCC1C57C`.
+- Build dependencies are locked by `pnpm-lock.yaml`.
+- Runtime server uses Node built-ins; `node_modules` is build-only and intentionally not bundled.
 
-Use only the official BepInEx build server or official BepInEx GitHub organization. Verify the archive hash before extraction; never use an unrelated repack.
+Only source BepInEx from the official BepInEx build server/GitHub organization and verify the pinned hash. Do not use repacks.
 
-## Clean-environment setup
+## Player install and update
 
-### 1. Prerequisites and checkout
+`start.bat` is the player entry point. Players need Windows, Steam, and the game; they do not need Node, npm, .NET, or a separate BepInEx download.
 
-Players need only Windows, Steam, and Path of Idle. Contributors need Git, Node.js with Corepack/pnpm, a .NET SDK with Roslyn, and Python 3 if regenerating icons.
+It:
+
+1. discovers Steam through registry data;
+2. parses every configured `libraryfolders.vdf`;
+3. locates app `4243990`;
+4. validates `PathOfIdle.exe`, `GameAssembly.dll`, and `PathOfIdle_Data`;
+5. installs the pinned bundled BepInEx only when safe;
+6. installs/updates only the plugin when its hash differs;
+7. starts the bundled Node server;
+8. waits for `/api/health`;
+9. opens `http://127.0.0.1:43127/`.
+
+Daily startup is idempotent. If the healthy server already exists, the launcher opens it. If the installed plugin already matches, it does not rewrite it.
+
+For updates, paste new files into the existing Path of Idle Stats folder and overwrite. Never delete the old folder first and never extract into a different folder, because ignored `data/path-of-idle-stats.sqlite` contains user filters and history.
+
+## Maintainer build and safe restart
+
+Source build:
 
 ```powershell
-git clone https://github.com/kpapadatos/path-of-idle-stats.git C:\r\path-of-idle-stats
-Set-Location C:\r\path-of-idle-stats
-corepack enable
 pnpm install --frozen-lockfile
-```
-
-### 2. Stage BepInEx (maintainer/source builds only)
-
-Download the pinned official IL2CPP x64 archive and extract it so this file exists:
-
-`C:\r\path-of-idle-stats\work\bepinex\BepInEx\core\BepInEx.Unity.IL2CPP.dll`
-
-Verify the download:
-
-```powershell
-$archive = 'C:\r\path-of-idle-stats\work\downloads\BepInEx-Unity.IL2CPP-win-x64-6.0.0-be.760+a1afbfb.zip'
-(Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
-```
-
-Expected: `9753B825578A3C3A31CC10067CD45A44A7BF56D3C34C4679E24D6ADFD0FBA8EA`.
-
-### 3. Generate game interop assemblies
-
-The plugin build needs BepInEx-generated IL2CPP assemblies. On a clean machine:
-
-1. Keep the game closed and copy the staged BepInEx distribution into the game directory.
-2. Start the game once and let BepInEx generate `BepInEx\interop`.
-3. Close the game normally before compiling or copying the telemetry plugin.
-
-Required references include:
-
-- `BepInEx\interop\Il2Cppmscorlib.dll`
-- `BepInEx\interop\UnityEngine.CoreModule.dll`
-- `BepInEx\interop\UnityEngine.ImageConversionModule.dll`
-
-Earlier broad Unity assembly scans caused noisy `TypeLoadException` messages such as invalid `LightProbesQueryDisposeJob` formats. The current plugin patches named methods directly and avoids broad assembly scanning.
-
-### 4. Build and install the plugin (maintainer/source builds only)
-
-The compiler still assumes the default Steam game directory; adjust that path if the game is installed elsewhere. Player installation does not: `start.bat` discovers all configured Steam library folders.
-
-```powershell
-.\scripts\build-plugin.ps1
-.\scripts\install.ps1 -GameDirectory 'C:\Program Files (x86)\Steam\steamapps\common\PathOfIdle'
-```
-
-The build, install, and update scripts use `plugin\bin\Release\net6.0\PathOfIdleStats.dll`.
-
-For later plugin-only updates, close the game and run:
-
-```powershell
-.\scripts\update-plugin.ps1
-```
-
-Installed destination: `<game>\BepInEx\plugins\PathOfIdleStats.dll`.
-
-Replacing the plugin requires a game restart. Starting or stopping the dashboard does not. After installation, start through Steam and enter the save so runtime hero/adventure objects exist.
-
-### 5. Build and run the dashboard
-
-```powershell
 pnpm build
-pnpm start
+.\scripts\build-plugin.ps1
 ```
 
-Open `http://127.0.0.1:43127/`. Useful checks:
+The plugin build references BepInEx-generated IL2CPP interop assemblies under the game. On a clean developer machine, install BepInEx, run the game once to generate `BepInEx\interop`, close normally, then build.
+
+### Reusable close/install/reopen script
+
+For normal plugin development, use:
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:43127/api/health
-Invoke-RestMethod http://127.0.0.1:43127/api/state
+.\scripts\restart-game-and-update.ps1
+```
+
+If the plugin is already built:
+
+```powershell
+.\scripts\restart-game-and-update.ps1 -SkipBuild
+```
+
+The script deliberately performs the following guarded sequence:
+
+1. verifies the exact game executable and Steam manifest;
+2. builds before closing the game, so compile failure leaves the running game untouched;
+3. finds only the exact `PathOfIdle.exe` process;
+4. requests a normal window close and refuses to force-kill on timeout;
+5. waits for game-directory helper processes to exit;
+6. configures BepInEx console logging;
+7. invokes the manifest-aware plugin updater;
+8. verifies built and installed DLL SHA-256 hashes match;
+9. creates tiny request markers under `BepInEx\PathOfIdleStats`;
+10. launches through `steam://rungameid/4243990`;
+11. waits for the plugin to locate the exact MainScene Continue handler;
+12. finds exactly one visible `UnityWndClass` belonging to the game PID, not the BepInEx terminal;
+13. restores and positions that game window on the right half of its monitor work area;
+14. acknowledges positioning, then the plugin invokes the real `OnContinueBtnClick`;
+15. waits for one active adventure UI with exactly three verified field cells;
+16. calls the real pointer-click path on each unchecked visible Auto toggle;
+17. confirms all three toggles are on and all three live battles exist.
+
+No screen coordinates, arbitrary mouse input, direct `SetAuto` call, or save mutation are used.
+
+Important gotcha: the current committed script always turns on all three Auto toggles and starts all battles. Do not run it blindly if a configured battle consumes scarce attempt materials or the user wants battles stopped. A temporary diagnostic-only `-SkipAuto` variation was previously used and then reverted; do not leave diagnostic changes in the repository.
+
+After restart, verify:
+
+```powershell
+$built = (Get-FileHash .\plugin\bin\Release\net6.0\PathOfIdleStats.dll -Algorithm SHA256).Hash
+$installed = (Get-FileHash '<game>\BepInEx\plugins\PathOfIdleStats.dll' -Algorithm SHA256).Hash
+$built -eq $installed
 Get-Content -Tail 100 '<game>\BepInEx\LogOutput.log'
 ```
 
-The server binds to loopback, not the LAN.
+The script does not start the Node dashboard. Use `start.bat` or `pnpm start` separately.
 
-### 6. Icons and catalogs
-
-Catalogs are emitted after `TableData.init`. The plugin exports referenced sprites on demand into `<game>/BepInEx/PathOfIdleStats/icons`, and the server serves that directory as the authoritative player source. Export uses a temporary GPU render target so it also works for Unity textures that are not CPU-readable; failed jobs remain queued for a later retry. The plugin discovers cached files before queueing work, exports at approximately 50 icons per second with a maximum three-icon catch-up batch, and persists/streams exact progress through `icons.progress.json` and `snapshot.icon-progress`. The dashboard remains behind a centered progress loader until the first complete state, then retries any later missing `/assets/icons/` images outside Angular change detection. `scripts/extract-icons.py` is an optional developer-only bulk extractor into `data/icons.json` and `data/icons/<sha256>.png`, which the server uses only as a fallback.
-
-Icons are derived from the locally installed game, can be large, may be copyrighted, and are not committed. A player install generates only referenced icons automatically at runtime.
-
-## Runtime architecture
+## Architecture
 
 ```text
-Path of Idle
-  -> BepInEx + Harmony postfix patches
+Path of Idle Unity runtime
+  -> BepInEx 6 IL2CPP + named Harmony hooks
   -> PathOfIdleStats.dll
-  -> POST /api/events on 127.0.0.1:43127
-  -> Node live state + data/path-of-idle-stats.sqlite
-  -> Server-Sent Events /api/stream
-  -> Angular dashboard
+  -> POST http://127.0.0.1:43127/api/events
+  -> Node state + request correlation + SQLite
+  -> SSE /api/stream
+  -> OnPush Angular dashboard
 ```
 
-If the server is unavailable, the plugin queues events and falls back to JSONL under `<game>\BepInEx\PathOfIdleStats\` rather than blocking the game.
+The plugin sends a two-second heartbeat. The backend marks the game stopped after five seconds without one and broadcasts only a liveness transition. General on-demand requests use atomic marker files in `<game>\BepInEx\PathOfIdleStats`. The selected-hero combat request is checked every 50 ms; general requests are checked four times per second. Telemetry enqueue triggers an immediate asynchronous drain.
 
-## Reverse-engineering knowledge
+The server binds only to `127.0.0.1`. `PATH_OF_IDLE_GAME_DIR` allows portable Steam library paths.
 
-Harmony postfixes are installed on:
+### Main HTTP API
 
-- `AdvBattleData.Create` — battle start and slot identity.
-- `CombatData.CreateEnemy` — enemy counting.
-- `AdvFieldData.BattleEnd` — the single completed-battle emission point after the adventure field finalizes rewards and global modifiers.
-- Do not capture loot from `DropSys.GetDropItemList` or `AdvFieldData.AddDropItem`; both occur before the late Gold/Blood reward adjustment.
-- `TableData.init` — one-time catalogs.
-- `Root.Update` — checks general on-demand snapshot markers four times per second and the lightweight selected-hero combat marker every 50 ms.
+- `GET /api/health` — server health.
+- `GET /api/state` — lightweight public live state.
+- `GET /api/catalogs` — current catalogs.
+- `GET /api/stream` — server-sent state.
+- `POST /api/events` — plugin ingestion, 1 MB limit.
+- `POST /api/snapshot` — requests slots/heroes/resources.
+- `POST /api/combat-snapshot` — correlated one-hero live capture.
+- `GET /api/battle-timelines/:battleId/heroes/:heroId` — only one historical hero timeline.
+- `DELETE /api/battles/0|1|2` — reset one slot.
+- `POST /api/catalogs/refresh` — on-demand catalog regeneration.
+- `GET /api/codex`, `POST /api/codex/refresh` — cached/on-demand Codex.
+- `GET|PUT /api/scanner/state` — persistent scanner state.
+- `POST /api/scanner/state/import` — guarded first migration from browser state.
+- `POST /api/scanner/scan` — one correlated backend-owned storage scan.
+- `GET /assets/icons/<sha256>.png` — serves local extracted icons.
 
-Important paths and fields:
+## Persistence and privacy
 
-- Live slots: `Game.dataMgr.nowSeasonData.advData.advFieldList`.
-- Slot heroes: each adventure field's `heroFieldList`, then `heroData`.
-- Selected basic skill: `SaveHeroData.baseSkillId`; changed by `HeroTalentData.ChangeBaseSkill(int attackId)`.
-- Talent position: `TTalentPos.row`, `.col`, `.type`, and `.index`.
-- Battle place: `battleMapData.mapSiteData`, `chapSiteData`/chapter row, and site row index.
-- English strings: explicitly query table translation data; never assume the active game language is English.
-- Verified exact English title: `Rift-Star Expanse-15`.
+`data/path-of-idle-stats.sqlite` contains:
 
-## Telemetry and HTTP API
+- `scanner_state`: exactly one row with the complete filters/groups/options JSON;
+- `battle_history_state`: exactly one row with retained history JSON;
+- `battle_timelines`: one gzip blob per retained battle;
+- `runtime_migrations`: idempotent migration records.
 
-Current events include `heartbeat`, `battle.started`, `battle.ended`, `snapshot.slots`, `snapshot.heroes`, `snapshot.combat`, `snapshot.resources`, `snapshot.scanner`, `inventory.item-added`, and catalogs for talents, skills, abilities, materials, runes, tools, curios, and equipment. The plugin sends a lightweight heartbeat every two seconds. The backend does not persist heartbeats or add them to the event list; it broadcasts `gameRunning` only when presence changes and marks the game stopped after five seconds without a heartbeat.
+Battle/timeline insertion, 50-per-slot pruning, and orphan deletion happen transactionally. Server restart restores history and scanner configuration. Reset deletes that slot's history and timelines. Scanner initial browser import creates a JSON backup before replacing server state.
 
-- `GET /api/health` — health and last update.
-- `GET /api/state` — live state excluding large catalogs.
-- `GET /api/catalogs` — catalogs.
-- `GET /api/stream` — server-sent live state.
-- `POST /api/events` — ingestion, limited to 1 MB.
-- `POST /api/snapshot` — creates `<game>\BepInEx\PathOfIdleStats\snapshot.request`.
-- `POST /api/combat-snapshot` — correlated request/response capture for one hero. It creates `combat-snapshot.request`, waits for the matching `snapshot.combat`, and returns the payload directly without broadcasting or replacing dashboard state.
-- `GET /api/battle-timelines/:battleId/heroes/:heroId` — decompresses and returns only the requested hero's retained one-second timeline for a historical battle.
-- `GET`/`PUT /api/scanner/state` — reads or atomically replaces the persisted scanner filters, groups, Auto setting, and warehouse setting.
-- `POST /api/scanner/scan` — correlated backend-owned full scan. It sends the compiled enabled filters and warehouse preference to the plugin, waits for one `snapshot.scanner` response, authoritatively revalidates candidates, updates the shared matches array, and returns it. Browser clients never poll `/api/state` for completion.
-- `DELETE /api/battles/0`, `/1`, or `/2` — clears one slot's history.
-- `GET /assets/icons/<sha256>.png` — local extracted icons.
+No telemetry is intentionally sent off-machine. Runtime data may include hero names, equipment, battle history, combat effects, and scanner configuration. All of it is ignored by Git.
 
-`Root.Update` consumes and deletes the general snapshot marker, then emits `snapshot.slots` and `snapshot.heroes`. Timeline capture uses a separate hero-specific path: the request carries `requestId` and `heroUniqueId`, the plugin extracts only live stats, effects, health/death state, and damage-meter data for that hero, and the backend resolves only the matching browser request. The telemetry writer drains immediately when an event is enqueued rather than polling every 250 ms. A general marker may be queued while the game is closed and consumed after the game starts and a save is entered.
+### Browser-local preferences
 
-Live state is held in memory, while the retained newest 50 completed battles per slot and scanner configuration are persisted in `data/path-of-idle-stats.sqlite`. Historical combat timelines are gzip-compressed into a separate `battle_timelines` table and referenced from their owning battle by an opaque ID. History insertion, timeline insertion, retention pruning, and orphan-timeline deletion happen in one SQLite transaction. Battle history is restored at server startup, updated synchronously on every `battle.ended`, and updated by the per-slot reset endpoint. Completed battles are never appended to `data/events.jsonl`; that file is limited to smaller non-snapshot diagnostic events. The first SQLite-enabled startup migrates the newest legacy battles, commits them, and permanently deletes the old raw event log. Catalogs overwrite individual files in `data/catalogs/`.
+Local storage is only for view preferences and migration compatibility:
 
-### Scanner architecture
+- talent compendium rank and selected/pinned talents;
+- Codex rarity and attribute search;
+- globally pinned hero stat keys;
+- selected average chapter for each battle slot;
+- legacy scanner filters/groups/Auto/warehouse values for one-time server import.
 
-- The Node backend owns scanner execution and the live matches array. All browser tabs consume the same state over SSE; opening extra tabs never creates extra game scans or extra auto matchers.
-- Auto mode is event-driven. Harmony patches `LordBagData.addItemToBag`, the plugin describes only that newly added equipment item, and the backend compares it against a precompiled `itemKey -> filters` index. It never periodically scans inventory. `inventory.item-added` events are priority telemetry and are not written to the diagnostic JSONL file.
-- Manual scanning is one correlated request/response, not a browser polling loop. The backend supplies a compact compiled filter plan. The plugin performs cheap rarity/definition-ID and affix-ID checks while traversing storage and calls the expensive full item description path only for candidates. The backend repeats the exact filter match before publishing results.
-- `includeWarehouse` is persisted with scanner configuration. When false, manual scans inspect only the live bag. When true, they also traverse every warehouse tab and the warehouse vault. It does not affect Auto, whose hook represents newly added bag items.
-- Scanner matches are intentionally in-memory runtime state, while filters/groups/options remain in the single SQLite scanner-state row. Raw inventory snapshots are not sent to browser clients.
-- Removing the anchor/first selected filter item promotes another remaining selected item as the anchor. The primary-type restriction disappears only when no selected items remain.
+Authoritative scanner state is SQLite, not local storage.
 
-## Dashboard product decisions
+## Plugin hooks and reverse-engineering map
 
-The dashboard intentionally contains only the header/status controls, three battle-slot panels, and hero modal. Do not restore removed summary, inventory, raw-event, catalog, or debug sections unless explicitly requested.
+Current named Harmony hooks:
 
-### Battle slots
+- `AdvBattleData.Create` — create per-slot battle capture and timeline schedule.
+- `CombatData.CreateEnemy` — count/describe enemies.
+- `ActionData.OnCastSkill` — per-talent cast counts.
+- `AdvTallyData.AddData` overload with five parameters — damage aggregation.
+- `AbilityCheckData.CreateByBulletCrit` — critical counts.
+- `AbilityCheckData.CreateByBulletDodge` — miss counts.
+- `AdvFieldData.BattleEnd` — one authoritative completed battle.
+- `TableData.init` — catalogs and icon total.
+- `Root.Update` — lightweight marker consumption, heartbeat, icon budget, timeline capture.
+- `TriggerResultData.DoAbility` + `ComAbilityData.AddAbility` + `AbilityData.Remove` — scoped effect provenance.
+- `LordBagData.addItemToBag` — event-driven automatic scanner for only the new equipment item.
 
-- Exactly three vertical panels: slots 0, 1, and 2.
-- Up to three heroes per panel in one row.
-- Runtime hero order is reversed for display to match visible in-game assignment order.
-- Tiles show name, English class, class icon, and level and are clickable.
-- Runtime hero avatar extraction was unreliable. All avatar hooks, routes, placeholders, and UI were removed. Do not restore placeholders without a reliable source.
-- Class icons map job IDs 1–6 to extracted content-addressed files.
-- **Refresh heroes** calls the on-demand snapshot endpoint.
+Patch known type/method names directly. Broad `Assembly.GetTypes()`/Harmony assembly scans caused noisy IL2CPP `TypeLoadException` failures such as invalid `LightProbesQueryDisposeJob`; do not reintroduce them.
 
-### Battle history
+Important runtime paths:
 
-- Retain the newest 50 completed battles per slot; drop the oldest and its timeline on insertion.
-- History expands, but individual battles start collapsed.
-- **Reset history** appears inside expanded history and clears only that slot.
-- Show exact English place, outcome, duration, timestamp, enemy count, wave, mode, and loot.
-- Aggregate stackable finalized loot by item type/ID and sum counts; keep equipment entries separate because their affixes and other rolled properties may differ.
-- Gold and Blood receive a late global Sanctum multiplier that is not represented by `AdvBattleData.teamGoldDropUp` (observed as zero). Read the finalized `AdvFieldData.dropItemList` in the `AdvFieldData.BattleEnd` postfix and emit exactly one authoritative `battle.ended` event. Never emit a provisional battle followed by a correction event.
-- Header format: `Battle history (50) - Rift-Star Expanse-15 Avg. Time: 31.211s`.
-- Average all retained entries in that slot (up to 50) whose resolved title exactly equals `Rift-Star Expanse-15`.
-- Format to three decimals plus `s`; show `n/a` when no exact matches exist.
+- `Game.dataMgr.nowSeasonData.advData.advFieldList` — three adventure fields.
+- field `heroFieldList -> heroData` — assigned slot heroes.
+- `AdvBattleData.comPlayerList` and each combat object's `heroData` — live hero matching.
+- `SaveHeroData.baseSkillId` — selected basic skill.
+- `HeroTalentData.ChangeBaseSkill(int attackId)` — game method that changes it; Stats only reads.
+- `TTalentPos.row/col/type/index` — fixed 6×5 talent position.
+- `battleMapData.mapSiteData`, `chapSiteData`, chapter row, site index — English place title.
+- `HeroData.attrData` — current/off-combat stats.
+- `CombatData.attrData` — live combat stats.
+- town `resDic` IDs 1/2/3 — Gold/Blood/Bone.
+- map save `towerFloor` — Sanctum floor.
+- Sanctum primary-resource bonus is directly derived by the game's rule at +2% per floor; payload rate is `floor * 0.02`, displayed as percent.
 
-### Hero talent modal
+English text must be explicitly resolved from the translation table regardless of active game language. Payloads generally carry raw/current and `english*` variants; UI prefers English.
 
-- Main tree is a fixed 6-row by 5-column grid; cells may be empty.
-- Use `positionRow`/`positionColumn`, with legacy fallback only for old telemetry.
-- Inspired talents appear in a centered row above the grid.
-- **Basic skills** and **Mutated skills** are separate, side-by-side sections with centered titles/content.
+## Data correctness gotchas
+
+### Battle completion and loot
+
+- Emit exactly one `battle.ended`; never emit provisional data followed by a correction.
+- Read finalized `AdvFieldData.dropItemList` in the `BattleEnd` postfix. Early drop hooks precede global reward adjustments and produced wrong Gold/Blood.
+- Gold/Blood Sanctum multiplication is already represented in finalized field loot; do not apply a guessed multiplier in the server/UI.
+- Tower mode differs: final boss rewards remain in `AdvBattleData.pendingBossDropList` during `BattleEnd`. Merge that list only for tower, deduplicate by same-live-instance pointer within that synchronous operation, then serialize stable item IDs. This recovers missing Gold/Blood/chests without double-counting other modes.
+- Aggregate stackable loot by type+ID; keep equipment separate because rolls differ.
+- Curio instances may have a specific English title such as **Echo of the Boss** or **Abyssal Scales**. Prefer instance/definition English names over the generic item-type name.
+- Loot speed uses all retained battle loot and durations. Sort descending globally, then split into two contiguous columns so every left-column entry is at least as large as every right-column entry.
+
+### Effects, stats, and damage
+
+- Effect labels/icons are not reliably parallel to the raw ability list. Capture origin during the game call that creates the ability and resolve a stable source skill/item immediately.
+- Enhancements such as Mettle may use their native effect identity. Auras/buffs should use a verified originating skill/item only when the relationship is proven.
+- If a source icon cannot be proven, use the generic effect fallback (historically the green arrow) instead of assigning a plausible but wrong skill.
+- Stacks come from the active runtime effect; never infer them by counting similarly named effects.
+- Stats enumerate all nonzero `EAttrType`, including hidden modifiers.
+- Build English stat metadata from `TAttr`. Use `AttrInfoData.Create`, `SetOwnHeroData`, `GetDesc`, `GetSpecialDesc`, and `GetExplain` with the hero level.
+- Preserve resolved explanation arguments. Crit Value descriptions contain multiple independently computed placeholders; replacing every placeholder with the raw stat value is wrong.
+- Main stat lists floor the visible number; tooltips retain precise values.
+- Live combat lists show only keys that also exist in current hero stats so both columns align.
+- Damage meter includes total damage/DPS and per-skill damage/DPS, casts, hits, criticals, and misses. Use K/M/B/T formatting.
+
+### Talents and icons
+
+- Talent tree is exactly six rows by five columns; empty cells are valid.
+- Talents and skills are different entities. Compendium lists talents only.
+- Talent rank descriptions are generated for ranks 1–15 from game preview objects and must update with the selected rank.
+- Preserve game line breaks: normalize `<br>` and newline data and render descriptions with `white-space: pre-line`.
+- Icon export keys are resolved from the same talent/item row as the title and description. Earlier cross-row reuse swapped icons such as Zod/Unyielding.
+- Runtime hero avatar extraction was unreliable and was completely removed. Do not add a placeholder or retry unless a stable source is found.
+
+## Icons and first-run loader
+
+Catalog creation queues every referenced sprite. The plugin exports PNGs into `<game>\BepInEx\PathOfIdleStats\icons` using a temporary render target so non-readable Unity textures work.
+
+- Existing cached files are discovered before work is queued.
+- Missing icons export at about 50/second, with a maximum three-icon catch-up batch per frame.
+- Exact dynamic progress is atomically stored in `icons.progress.json` and emitted as `snapshot.icon-progress`.
+- Never hardcode the total icon count. The dashboard waits for the plugin's real total.
+- Before completion, show only the centered **Loading...** bar and exact `completed / total`.
+- If the game is closed, show **(Start the game to continue)**.
+- Missing icon responses are retried outside Angular; do not display a dashboard full of permanent broken images.
+- Game-extracted/copyrighted icons are local and ignored. `data/icons` is only a developer fallback.
+
+## Current dashboard contract
+
+The viewport is a fixed-height application. Header, resource row, and top tabs remain visible; each page tab body scrolls independently.
+
+### Header and resources
+
+- Title: **Path of Idle Stats**, followed by live `v<pluginVersion>`.
+- Controls: Refresh heroes, Game running/stopped, Backend connected/reconnecting.
+- Four equal cards: icon+number for Gold, Blood, Bone; text-only `Sanctum Floor X (+Y%)`.
+- Resource values and Sanctum update on battle end and explicit snapshots from runtime state.
+
+### Battles tab
+
+- Exactly three vertical battle panels.
+- Each panel has three ordered hero tiles. Runtime order is reversed to match game display order.
+- Hero tile: class icon before name and level on the same row. No avatar, class-name text, “Position,” “Team order,” or “Battle Slot” labels.
+- Hero tiles open the hero modal in normal live/manual context.
+- History retains newest 50 per slot and starts collapsed at both slot-history and individual-battle levels.
+- Reset history is always visible at the right end of the history summary, disabled when empty, and visually subtle.
+- History header dims the count/chapter portion and centers `Avg. Time: X.XXXs`.
+- Average selector defaults to standard **Rift-Star Expanse-15**, is persisted per slot, and lists distinct retained titles for that slot. Treasure variants are separate and display `(Treasure)`.
+- Picker has an auto-focused search. Average includes only completed wins whose exact title and treasure flag match the selection.
+- The info tooltip explains that the average applies only to the selected chapter.
+- Each collapsed battle row shows place/result/duration, timestamp, and a centered three-hero final-DPS strip.
+- Missing hero/DPS data leaves that slot empty; never shift another hero into it.
+- Clicking a DPS hero opens that hero's read-only retained timeline without preventing the surrounding battle row from expanding.
+- Expanded battle shows enemy count, wave, mode, and finalized loot.
+- Loot speed appears below the three slots in a compact two-column descending list with icon/title/rate.
+
+### Talents tab
+
+- Full-width search over talent title, class, description, and IDs.
+- Rank control is `− [1..15] +`; native number spinners are hidden and the number is centered.
+- Three-column cards show talent icon, overlaid class icon, title, class, rank-scaled description, and `rank/15` at 50% opacity.
+- Clicking toggles selection and displays a pin after the title.
+- Selected talents appear in their own three-column grid above the main grid; a divider exists when at least one is selected.
+- Selected talent IDs and rank persist in local storage.
+
+### Codex tab
+
+- Fetches on first entry and on Refresh; it is not continually polled.
+- Left rarity views: Rare (default), Legendary, Set, Unique, Mythic. Last rarity persists.
+- Right side is a ten-column square icon grid sorted by item part, weapon subtype where applicable, table sort index, then ID.
+- Square displays Codex awareness.
+- Rarity backgrounds: rare yellow, legendary orange, set green, unique cyan, mythic red. Use these consistently in Codex and Scanner.
+- Clicking opens possible affixes produced through the game's Codex eligibility path. Never list generic damage affixes on parts for which the game does not allow them.
+- Attribute rows show rank as `9`, not “Rank 9,” and are vertically centered.
+- Display game rank-9 ranges such as `Physical Attack +(20–29%)`.
+- Affixes excluded/disabled in the player's Codex are retained and shown with a red background and **Excluded**.
+- Attribute search sits above the scroll area, persists across items/local refresh, auto-focuses, and selects its contents when the dialog opens.
+
+### Scanner tab
+
+- Button row: Scan all storage, Create item filter, Create filter group, Warehouse switch+info, Auto switch+info.
+- Manual scanning is backend-owned and correlated. Warehouse off scans inventory only; on also scans every warehouse tab and vault.
+- Auto is event-driven from `LordBagData.addItemToBag`; it compares only the newly added equipment item against the backend's compiled enabled-filter index. It never presses Scan on an interval.
+- Backend owns the shared matches array. Every browser tab observes the same result without initiating duplicate work.
+- A pleasant short Web Audio notification plays only when a match notification ID changes.
+- Match tooltip includes full item data, storage location (`WAREHOUSE STORAGE - TAB N` when known), affixes, every matched filter, and group title.
+- Filter cards are a three-column grid, enabled by default, single-click renameable, editable, and deletable.
+- Card preview shows first five items and a compact `+N more` tile.
+- Groups can be renamed in place, reordered, collapsed, expanded, and accept dragged filters. Ungrouped is a drop target.
+- Deleting a nonempty group requires a modal warning that its contained filters will also be deleted.
+- Editor changes auto-save; closing is not the save action.
+- Item picker contains all Codex items/rarities. Selecting the first item establishes the primary part restriction; removing it promotes another selected item as anchor. Restriction clears only when no items remain.
+- Selected items are shown only in the picker, not duplicated above it. Click again or right-click to unselect.
+- Item picker uses compact ten-column icons.
+- Items and Options share a row. Options currently contains `Must match at least X selected attributes` with bounds 1..selected-stat-count.
+- Available/selected attributes are side by side, each with a header search outside its independently scrolling list.
+- Click adds a stat. Right-click or X removes a selected stat.
+- If an affix is disabled for any selected item, show it red, prevent adding it, and expose a fixed tooltip listing `Item name (Rarity)`.
+- Filters/groups/Auto/Warehouse are persisted in the single SQLite state row. Never silently replace them with empty browser defaults.
+
+### Hero modal
+
+- **Stats** is the first/default tab; **Talents** is second.
+- Modal header and tabs stay fixed; each tab body scrolls independently.
+
+Talents view:
+
+- Inspired talents centered above the tree.
+- Fixed 6×5 grid uses explicit row/column metadata and allows holes.
 - Talents are circles; skills are squares.
-- Basic skills are fixed, position-0 skills, normally three.
-- Exactly one basic skill is selected by `baseSkillId`; show an emerald ring and **Selected** badge.
-- Mutated skills are unpositioned, non-inspired skills that are not basic.
-- Tooltips show English name, rank, optional description, skill ID, and tags.
-- Talents legitimately have no description; never show “No description available.”
-- Every Angular component uses `ChangeDetectionStrategy.OnPush`. Historical DPS controls are isolated OnPush components with stable battle/hero tracking keys. The client reconciles immutable battle IDs and reuses existing battle object/array references, so unrelated telemetry cannot recreate retained rows or interrupt hover state.
-- Heartbeats only broadcast when game-running status changes. Normal heartbeat acknowledgements update server liveness without waking Angular. Public state and SSE omit unused raw-event/general-hero collections and contain cached lightweight battle summaries (metadata, compact hero DPS summary, and compact loot); enemies and full historical hero data stay server-side and are fetched only by the historical-timeline endpoint. With all three live slot snapshots present, this reduced the measured 150-battle state payload from about 49 MB to about 1.5 MB.
-- Tooltip behavior is document-level: `pointermove`, `elementFromPoint`, nearest `[data-talent-id]`, fixed positioning, viewport-edge flipping, `pointer-events: none`, and immediate clearing off-tile, on document leave, window blur, or modal close. Ordinary SSE/battle updates must not clear an active tooltip.
-- Keep tooltip DOM outside overflow-clipped grid regions.
+- Ranked talents and skills use the same highlighted-border style; rank text is centered below.
+- **Basic skills** and **Mutated skills** share one row as separate centered sections.
+- Exactly one of the three basic skills is selected via `baseSkillId`; show selected ring/badge.
+- Hover tooltip contains English title, rank, optional description, skill ID, and tags. Talents with no description show no placeholder sentence.
 
-### Hero stats tab
+Stats view:
 
-- The hero dialog is a tab group with **Talents** first and **Stats** second.
-- Stats contains two side-by-side lists: `HeroData.attrData` for current/base values and the matching `CombatData.attrData` for live combat values.
-- The **Refresh** button uses the correlated hero-specific combat endpoint, always adds the returned capture to the timeline, and updates the open hero without rebuilding all slots/heroes.
-- Recording uses the same serialized capture path at a one-second cadence; it never overlaps requests and still stops on hero death, manual stop, or the selected slot's battle transition.
-- Historical timelines do not use the browser recording path. The plugin owns a staggered one-second schedule for each active battle slot, samples the slot's three heroes in one batch, and removes that capture at `BattleEnd`, so the seven-second intermission produces no samples. Compact snapshots use numeric stat pairs plus battle-local interned effect and damage definitions to minimize Unity allocation, transport, and storage cost.
-- Clicking a hero's DPS summary in a retained battle lazily requests only that hero's timeline. The regular hero dialog opens in read-only historical context: timeline navigation works, while Clear, Record, and Refresh cannot alter the retained snapshots. Opening a hero from the current battle-slot card keeps the normal empty/manual timeline behavior.
-- Match each hero to combat state through `AdvFieldData.advBattleData.comPlayerList` and the combat object's `heroData` pointer.
-- Enumerate every nonzero `EAttrType`, including normally hidden/internal modifiers. Use `TAttr` for English names/descriptions and retain the enum key plus numeric ID for transparency.
-- Use `AttrInfoData.Create`, `SetOwnHeroData`, `GetDesc`, `GetSpecialDesc`, and `GetExplain` for the game's resolved derived explanations. Pass the hero's level for both base and combat attributes.
-- Crit explanations are verified to resolve values such as `Crit Value: 9629` into 54% crit chance and 154% additional damage.
+- Fixed top stack: timeline, full-width horizontally scrolling effect row with background, then controls.
+- Timeline has horizontal gutter so first/last circles do not touch the border; points remain relatively spaced from first to last.
+- Empty effect row says **Buffs and debuffs will appear here.** with 15 px left padding.
+- Effect icons are compact with a two-pixel gap; debuffs follow buffs without “Buffs”/“Debuffs” headings.
+- Controls: previous, next, Clear (always present, disabled when empty), Record/Stop, Refresh.
+- Refresh adds one snapshot. Record serializes non-overlapping one-second requests and stops on death, manual stop, or selected-slot battle transition. Refresh is disabled while recording.
+- The area below controls scrolls independently so timeline/effects/buttons remain visible.
+- Left panel switches between **Current hero stats** and **Damage done**; its heading height aligns exactly with **Live combat stats**.
+- Current/off-combat values must continue to come from `HeroData.attrData`; live values come from the chosen snapshot's `CombatData.attrData`.
+- Clicking any stat pins/unpins it globally for all heroes, adds a pin, hoists pinned keys in stable order, and persists them.
+- Damage view shows total DPS/damage/elapsed and per-skill `damage | Casts | Hits (crit, miss)`.
+- Historical context is read-only. Clear/Record/Refresh are disabled and cannot mutate retained timeline data.
 
-## English localization
+## Combat timeline architecture
 
-Prefer extracted English values regardless of active language. Payloads carry pairs such as `name`/`englishName`, `description`/`englishDescription`, and `placeTitle`/`englishPlaceTitle`; the UI prefers English and falls back to current-language values.
+Live manual capture:
 
-Catalogs cover talents, skills, abilities, materials, runes, tools, curios, and equipment. Hero talent payloads include ranks, fixed grid position metadata, tags, icon URL, skill ID, and selection state.
+- Browser calls one correlated backend endpoint.
+- Backend writes a request with `requestId` and `heroUniqueId`.
+- Plugin extracts only that hero and returns a matching `snapshot.combat`.
+- Backend resolves the waiting request directly instead of replacing all dashboard state.
 
-## Data retention and privacy
+Historical capture:
 
-- Backend keeps and persists the newest 50 battles per slot in SQLite.
-- Rift-Star average uses all retained exact matches (up to 50).
-- Historical combat timelines belong to their battle, are stored gzip-compressed in SQLite, and are deleted transactionally when that battle is reset or falls out of retention.
-- `data/path-of-idle-stats.sqlite` contains retained battle history and scanner state; it is ignored.
-- `data/events.jsonl` contains only non-snapshot, non-completed-battle diagnostic events and is ignored.
-- Catalogs and icons are ignored.
-- No telemetry is intentionally sent off-machine.
-- Public GitHub repository: [https://github.com/kpapadatos/path-of-idle-stats](https://github.com/kpapadatos/path-of-idle-stats).
+- Plugin, not the browser, owns a staggered one-second schedule for every active battle.
+- It samples all three heroes in a slot as one batch, supporting up to nine active heroes without nine browser pollers.
+- It captures no samples during the seven-second intermission because the battle object is absent.
+- A forced final sample is taken at `BattleEnd`.
+- Snapshots use compact numeric stat pairs and battle-local interned effect/damage definitions.
+- Backend strips `combatTimelines` from the public battle payload, gzip-compresses each retained timeline, and serves one hero lazily.
 
-## Portability notes
+## Performance lessons
 
-- Player startup is portable across Steam library drives: `scripts/find-game.ps1` discovers Steam from registry data, parses `libraryfolders.vdf`, validates app manifest `4243990`, and verifies the executable/data layout.
-- `start.bat` installs from checked-in `vendor/bepinex` and `release/PathOfIdleStats.dll`, starts `vendor/node/node.exe`, passes the discovered game directory to the server, waits for `/api/health`, and opens the browser.
-- The server uses `PATH_OF_IDLE_GAME_DIR` for request-file IPC instead of a hard-coded game location.
-- `node_modules` remains intentionally ignored because it is build-only and adds about 208 MB without helping players.
-- Maintainer-only `build-plugin.ps1` still assumes the default Steam interop directory; parameterizing that build path and pinning icon-extraction dependencies remain future cleanup.
+- Never send full hero catalogs/stats/equipment inside every public retained battle row.
+- Public state uses lightweight battle summaries; full historical hero/timeline data stays server-side.
+- Reuse prior object/array references when IDs and content are unchanged.
+- Scanner matching precompiles `itemKey -> enabled filters`; plugin checks rarity/definition ID and affix IDs before expensive item serialization.
+- Auto scanner is a hook, not polling.
+- Manual scanner traverses storage once and describes only candidate matches.
+- Combat requests are correlated and immediately drained, not discovered by slow browser polling.
+- Keep Unity work bounded per frame (notably icon export and timeline scheduling).
 
-## Troubleshooting
+## Testing and verification
 
-- Angular blank screen with `NG0908`: retain `import 'zone.js';` at the top of `web/src/main.ts`, then rebuild.
-- Dashboard unavailable: confirm `dist/dashboard/browser/index.html`, Node port 43127, and `/api/health`.
-- No telemetry: confirm the plugin DLL, inspect `BepInEx\LogOutput.log`, enter a save, start the server, and request a snapshot.
-- Missing icons: confirm the game is running with plugin 0.7.8 or newer and check `<game>/BepInEx/PathOfIdleStats/icons`; the dashboard's ignored `data/icons` cache is only a developer fallback.
-- Place says only `chapter`: build it from English chapter row plus site index, e.g. `Rift-Star Expanse-15`.
-- No selected marker: request a fresh snapshot and verify a basic skill has `selected: true` from `SaveHeroData.baseSkillId`.
-
-## Development and Git workflow
-
-Before committing dashboard work:
+For dashboard/server changes:
 
 ```powershell
 pnpm build
+node --check .\server\server.mjs
 Invoke-WebRequest http://127.0.0.1:43127/ | Select-Object StatusCode
+Invoke-RestMethod http://127.0.0.1:43127/api/health
 git diff --check
 git status --short
 ```
 
-For plugin changes: close the game, build, update, verify DLL hashes, restart, enter the save, inspect the BepInEx log, request a snapshot, and confirm three slots plus hero/talent selection data.
+Use the running dashboard to verify the exact interaction, especially:
 
-Release rule: unless the user explicitly says otherwise, every request to **commit and push** also means increment the patch component of `Plugin.PluginVersion`, rebuild and verify the bundled/installed DLL, commit the resulting release artifacts, create an annotated `v<version>` Git tag on that commit, and push both `main` and the tag. Never reuse or move an existing release tag.
+- hover remains stable while battles finish/SSE arrives;
+- tooltips close on mouseout and remain attached to the correct snapshot object;
+- history count stays ≤50 per slot after restart;
+- reset deletes SQLite timeline ownership;
+- scanner filters survive refresh/server restart/update;
+- Auto adds only newly acquired matching items;
+- manual warehouse scan labels tabs correctly;
+- current and live hero stats remain aligned;
+- historical timelines are read-only.
 
-The public repository is [https://github.com/kpapadatos/path-of-idle-stats](https://github.com/kpapadatos/path-of-idle-stats); the default branch is `main`. Preserve reproducibility with pinned runtime versions, published archive hashes, bundled licenses, scripts, and verification checks. Never commit runtime telemetry or game-derived assets.
+For plugin changes:
+
+1. build before closing the game;
+2. use the safe restart script when its Auto behavior is acceptable;
+3. verify installed and built hashes;
+4. inspect `BepInEx\LogOutput.log`;
+5. enter the save and request a fresh snapshot;
+6. compare extracted values against the visible game;
+7. test all three battle modes/slots when shared loot/history code changed.
+
+Do not leave diagnostic hooks, temporary marker files, traces, or experiments installed. Restore source and installed DLL to the released baseline after one-off investigations.
+
+## Release workflow
+
+Only when explicitly asked to commit and push:
+
+1. confirm the user has tested the current behavior when runtime testing is needed;
+2. increment `Plugin.PluginVersion` patch component;
+3. rebuild plugin and production Angular dashboard;
+4. copy the built DLL to `release/PathOfIdleStats.dll`;
+5. verify build/install hashes as appropriate;
+6. run build, syntax, diff, status, and focused runtime checks;
+7. commit a concise release commit;
+8. create annotated tag `v<version>`;
+9. push `main` and the tag;
+10. confirm remote branch/tag point to the expected commit.
+
+Do not include `data/`, extracted icons, SQLite, logs, `work/`, install manifests, tokens, or machine-specific files.
+
+## Troubleshooting
+
+- Angular black screen / `NG0908`: retain `import 'zone.js';` before bootstrap, rebuild.
+- Dashboard unavailable: verify `dist/dashboard/browser/index.html`, port 43127, and `/api/health`.
+- No game data: game must be running inside a save, not only at main menu; inspect plugin DLL and BepInEx log, then request snapshot.
+- Game indicator stale: heartbeat is every two seconds; stopped threshold is five seconds.
+- Missing icons: wait for dynamic loader with game running; inspect `icons.progress.json` and local icon directory.
+- Place says only “chapter”: resolve English chapter row plus site index, e.g. `Rift-Star Expanse-15`.
+- Wrong selected basic skill: refresh and verify `SaveHeroData.baseSkillId`.
+- Wrong loot amounts: confirm data comes from finalized BattleEnd field list; for tower also merge pending boss drops.
+- Wrong/mutating effect title or icon: audit transient pointer/index caching first.
+- UI hover flicker: audit reference reconciliation, `trackBy`, OnPush boundaries, and unnecessary SSE broadcasts.
+- Scanner says matches but lists none: inspect correlation response and backend authoritative matches, not browser polling flags.
+- Filters disappeared: stop before writing; inspect SQLite scanner row and `data/scanner-state-backups`; never initialize server state from empty local storage over existing SQLite.
+- Version still old after dashboard refresh: the version is emitted by the running plugin heartbeat. Rebuild/install/restart the game; rebuilding only the dashboard cannot change it.
+
+## Public repository hygiene
+
+The repository is intended to be safe and public. Before releases, search tracked files and history for secrets, personal paths/usernames, telemetry, and save-related data. Default public Steam paths and the public GitHub URL are acceptable; authentication tokens and machine/user-specific paths are not. Use the authenticated local `gh` CLI without writing credentials into the repository.
