@@ -105,7 +105,7 @@ class BattleHeroDpsComponent {
         <button type="button" role="tab" (click)="selectPageTab('scanner')" [attr.aria-selected]="selectedPageTab() === 'scanner'" class="border-b-2 px-4 py-2 text-sm font-medium" [class]="selectedPageTab() === 'scanner' ? 'border-amber-400 text-amber-300' : 'border-transparent text-zinc-500 hover:text-zinc-300'">Scanner</button>
       </nav>
 
-      <div #pageTabBody class="page-tab-body min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1 pb-3">
+      <div #pageTabBody class="page-tab-body min-h-0 flex-1 overflow-y-auto overscroll-contain">
       <ng-container *ngIf="selectedPageTab() === 'battles'">
 
       <section class="space-y-3">
@@ -203,8 +203,8 @@ class BattleHeroDpsComponent {
       </section>
       </ng-container>
 
-      <section *ngIf="selectedPageTab() === 'compendium'" aria-label="Talent compendium">
-        <div class="mb-3 flex items-center gap-3">
+      <section *ngIf="selectedPageTab() === 'compendium'" class="flex h-full flex-col" aria-label="Talent compendium">
+        <div class="mb-3 flex shrink-0 items-center gap-3">
           <label class="min-w-0 flex-1">
             <span class="sr-only">Search talents</span>
             <input type="search" [value]="talentSearch()" (input)="setTalentSearch($event)" placeholder="Search talents, classes, descriptions, IDs…" class="w-full rounded-xl border border-zinc-700 bg-zinc-950 px-4 py-2.5 text-sm text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-amber-600 focus:ring-1 focus:ring-amber-600">
@@ -216,7 +216,9 @@ class BattleHeroDpsComponent {
           </div>
         </div>
 
-        <section *ngIf="selectedCompendiumTalents().length" class="mb-5 border-b border-zinc-800 pb-5" aria-label="Selected talents">
+        <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-1">
+        <div class="flex flex-col gap-4">
+        <section *ngIf="selectedCompendiumTalents().length" class="border-b border-zinc-800 pb-5" aria-label="Selected talents">
           <h2 class="mb-2 text-sm font-semibold text-zinc-300">Selected talents</h2>
           <div class="grid grid-cols-3 gap-3">
             <ng-container *ngFor="let talent of selectedCompendiumTalents(); trackBy: trackCompendiumTalent">
@@ -229,6 +231,8 @@ class BattleHeroDpsComponent {
           <ng-container *ngFor="let talent of compendiumTalents(); trackBy: trackCompendiumTalent">
             <ng-container *ngTemplateOutlet="compendiumTalentCard; context: { $implicit: talent }"></ng-container>
           </ng-container>
+        </div>
+        </div>
         </div>
         <ng-template #compendiumTalentCard let-talent>
           <button type="button" (click)="toggleCompendiumTalent(talent)" [attr.aria-pressed]="isCompendiumTalentSelected(talent)" [class]="isCompendiumTalentSelected(talent) ? 'flex min-w-0 gap-3 rounded-xl border border-amber-600 bg-amber-950/20 p-3 text-left transition hover:bg-amber-950/30' : 'flex min-w-0 gap-3 rounded-xl border border-zinc-800 bg-zinc-900/70 p-3 text-left transition hover:border-zinc-600 hover:bg-zinc-900'">
